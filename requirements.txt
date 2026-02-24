@@ -1,0 +1,37 @@
+# --- Frameworks ---
+django>=4.2.0           # 유저 관리 및 DB 어드민
+fastapi>=0.100.0        # 고성능 AI 파이프라인 엔진
+uvicorn[standard]       # FastAPI 실행을 위한 ASGI 서버
+
+# --- Database & Models ---
+mysqlclient             # MySQL 연결 (Django/FastAPI 공용)
+pandas                  # CSV 데이터 가공 및 DB 주입용
+pydantic>=2.0.0         # FastAPI 데이터 검증용
+
+# --- AI & LLM Orchestration ---
+langchain>=0.1.0        # LLM 파이프라인 구축
+langchain-openai        # OpenAI 연동 (필요 시)
+langgraph>=0.0.10       # LangGraph 워크플로우 제어 (필수)
+langsmith               # LangGraph 디버깅 및 트레이싱
+openai>=1.0.0           # AsyncOpenAI 사용을 위한 공식 SDK
+
+# --- API & Networking ---
+httpx                   # FastAPI에서 FDA API를 호출할 비동기 클라이언트
+requests                # 일반적인 동기 HTTP 요청용
+python-dotenv           # .env 파일에서 API 키/DB 비번 로드용
+
+# --- Utils ---
+openpyxl                # 엑셀(.xlsx) 파일 처리용
+cryptography            # 보안 및 암호화 관련
+python-jose[cryptography] # JWT 토큰 생성 및 검증
+passlib[bcrypt]         # 비밀번호 해싱
+python-multipart        # 로그인 폼 데이터 처리
+
+# --- Added by Agent ---
+djangorestframework     # REST API 구축 (추천)
+django-cors-headers     # 프론트엔드 연동 시 CORS 해결 (추천)
+tqdm                    # 데이터 처리 진행률 표시 (Scripts용)
+ipython                 # 향상된 쉘 환경 (manage.py shell_plus 등)
+jinja2                  # 템플릿 엔진 (필수)
+tiktoken                # OpenAI 토큰 계산 (권장)
+supabase
