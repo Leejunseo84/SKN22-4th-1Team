@@ -3,6 +3,7 @@ import asyncio
 from .state import AgentState
 from services.ai_service_v2 import AIService
 from services.drug_service import DrugService
+from services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -11,12 +12,9 @@ async def classify_node(state: AgentState) -> AgentState:
     """Classify user query and extract keywords"""
     query = state["query"]
 
-    cache_key_task = AIService.normalize_symptom_query(query)
-    intent_task = AIService.classify_intent(query)
-    
-    cache_key, intent = await asyncio.gather(cache_key_task, intent_task)
+    intent = await AIService.classify_intent(query)
 
-    logger.info(f"Classifying query (cache_key: {cache_key})")
+    logger.info("Classifying query")
 
     category = intent.get("category", "invalid")
     keyword = intent.get("keyword", "")
@@ -25,7 +23,7 @@ async def classify_node(state: AgentState) -> AgentState:
         "category": category,
         "keyword": keyword,
         "symptom": query if category == "symptom_recommendation" else None,
-        "cache_key": cache_key if category == "symptom_recommendation" else None,
+        "cache_key": None,
         "is_cached": False,
     }
 
@@ -35,11 +33,26 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
     category = state["category"]
     keyword = state["keyword"]
     query = state["query"]
+    user_profile_data = state.get("user_profile")
+
+    if category == "symptom_recommendation" and not user_profile_data:
+        user_info = state.get("user_info")
+        if user_info:
+            try:
+                profile = await UserService.get_profile(user_info)
+                if profile:
+                    user_profile_data = {
+                        "current_medications": profile.current_medications,
+                        "allergies": profile.allergies,
+                        "chronic_diseases": profile.chronic_diseases,
+                    }
+            except Exception as e:
+                logger.error(f"Error fetching user profile from Supabase: {e}")
 
     fda_data = None
     dur_data = []
 
-    # ── Step 1: FDA retrieval ──
+    # ?? Step 1: FDA retrieval ??
     if category == "symptom_recommendation":
         eng_kw = [keyword] if keyword and keyword != "none" else ["pain"]
         fda_ingrs = await DrugService.get_ingrs_from_fda_by_symptoms(eng_kw)
@@ -59,7 +72,7 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
         target = keyword if keyword and keyword != "none" else query
         fda_data = await DrugService.search_fda(target)
 
-    # ── Step 2: DUR retrieval (depends on FDA results) ──
+    # ?? Step 2: DUR retrieval (depends on FDA results) ??
     if fda_data:
         if category == "symptom_recommendation" and isinstance(fda_data, list):
             dur_data = await DrugService.get_enriched_dur_info(fda_data)
@@ -67,7 +80,11 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
             ingrs = fda_data.get("active_ingredients", "")
             dur_data = await DrugService.get_dur_by_ingr(ingrs)
 
-    return {"fda_data": fda_data, "dur_data": dur_data}
+    return {
+        "fda_data": fda_data,
+        "dur_data": dur_data,
+        "user_profile": user_profile_data,
+    }
 
 
 async def generate_symptom_answer_node(state: AgentState) -> AgentState:
@@ -84,7 +101,7 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             "ingredients_data": state.get("ingredients_data", []),
         }
 
-    # DUR 데이터가 없으면 일반 AI 답변으로 폴백
+    # DUR ?곗씠?곌? ?놁쑝硫??쇰컲 AI ?듬??쇰줈 ?대갚
     if not dur_data:
         fallback_query = (
             f"The user asked about '{symptom}' but I couldn't find specific drugs in the FDA/DUR database. "
@@ -92,12 +109,10 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             f"(User query: {state['query']})"
         )
         answer = await AIService.generate_general_answer(fallback_query)
-        prefix = "해당 증상에 대한 FDA/DUR 기반의 정확한 의약품 정보는 찾을 수 없었지만, 일반적인 정보를 안내해 드립니다.\n\n"
+        prefix = "?대떦 利앹긽?????FDA/DUR 湲곕컲???뺥솗???섏빟???뺣낫??李얠쓣 ???놁뿀吏留? ?쇰컲?곸씤 ?뺣낫瑜??덈궡???쒕┰?덈떎.\n\n"
         return {"final_answer": prefix + answer, "ingredients_data": []}
 
-    # ── 병렬 실행: AI 안전성 판단 + 모든 성분 제품 조회 ──
-    # 모든 성분명 추출 (AI 판단 전에 제품 조회 미리 시작)
-    all_ingredient_names = [item["ingredient"].upper() for item in dur_data]
+    # Generate AI judgment first, then fetch products only for safe ingredients.
 
     async def fetch_products(ingr_name: str):
         from services.map_service import MapService
@@ -108,19 +123,13 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             logger.warning(f"Failed to fetch products for '{ingr_name}': {e}")
             return ingr_name, []
 
-    # AI 판단과 제품 조회를 동시에 실행
-    ai_task = AIService.generate_symptom_answer(
+    # AI result is required to determine which ingredients are safe to fetch.
+    ai_result = await AIService.generate_symptom_answer(
         symptom, dur_data, state.get("user_profile")
     )
-    product_tasks = [fetch_products(n) for n in all_ingredient_names]
-
-    results = await asyncio.gather(ai_task, *product_tasks)
-    ai_result = results[0]
-    product_results = results[1:]
-    products_map = dict(product_results)
 
     if not isinstance(ai_result, dict):
-        # 예외적 폴백
+        # ?덉쇅???대갚
         return {
             "final_answer": str(ai_result),
             "dur_data": dur_data,
@@ -134,10 +143,21 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
         f"AI classified {len(ai_ingredients)} ingredients for symptom '{symptom}'"
     )
 
-    # DUR 상세 데이터를 성분명 기준으로 인덱싱
+    safe_name_set = {
+        ing.get("name", "").upper()
+        for ing in ai_ingredients
+        if ing.get("can_take", False) and ing.get("name")
+    }
+    all_ingredient_names = [item["ingredient"].upper() for item in dur_data]
+    target_product_names = [name for name in all_ingredient_names if name in safe_name_set]
+    product_tasks = [fetch_products(name) for name in target_product_names]
+    product_results = await asyncio.gather(*product_tasks) if product_tasks else []
+    products_map = dict(product_results)
+
+    # DUR ?곸꽭 ?곗씠?곕? ?깅텇紐?湲곗??쇰줈 ?몃뜳??
     dur_map = {item["ingredient"].upper(): item for item in dur_data}
 
-    # 최종 ingredients_data 조립 (safe 성분만 products 포함)
+    # 理쒖쥌 ingredients_data 議곕┰ (safe ?깅텇留?products ?ы븿)
     ingredients_data = []
     for ing in ai_ingredients:
         name = ing.get("name", "").upper()
@@ -170,12 +190,12 @@ async def generate_product_answer_node(state: AgentState) -> AgentState:
     dur_data = state["dur_data"]
 
     if not fda_data:
-        return {"final_answer": "해당 의약품 정보를 찾을 수 없습니다."}
+        return {"final_answer": "?대떦 ?섏빟???뺣낫瑜?李얠쓣 ???놁뒿?덈떎."}
 
     brand_name = fda_data.get("brand_name")
     indications = fda_data.get("indications")
 
-    answer = f"**{brand_name}** 정보입니다.\n\n**효능/효과**:\n{indications}\n\n**DUR/주의사항**:\n"
+    answer = f"**{brand_name}** ?뺣낫?낅땲??\n\n**?⑤뒫/?④낵**:\n{indications}\n\n**DUR/二쇱쓽?ы빆**:\n"
     for d in dur_data:
         answer += f"- {d['ingr_name']} ({d['type']}): {d['warning_msg']}\n"
 
@@ -191,5 +211,6 @@ async def generate_general_answer_node(state: AgentState) -> AgentState:
 async def generate_error_node(state: AgentState) -> AgentState:
     """Handle invalid queries"""
     return {
-        "final_answer": "죄송합니다. 질문을 이해하지 못하거나 의약품과 관련이 없는 질문입니다."
+        "final_answer": "二꾩넚?⑸땲?? 吏덈Ц???댄빐?섏? 紐삵븯嫄곕굹 ?섏빟?덇낵 愿?⑥씠 ?녿뒗 吏덈Ц?낅땲??"
     }
+

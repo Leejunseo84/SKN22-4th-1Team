@@ -1,9 +1,19 @@
 import asyncio
 import logging
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from .models import UnifiedDrugInfo
-from django.db.models import Q
+
+try:
+    from rest_framework.views import APIView
+    from rest_framework.response import Response
+except ModuleNotFoundError:
+    from django.http import JsonResponse
+    from django.views import View
+
+    class APIView(View):
+        pass
+
+    def Response(data, status=200):
+        return JsonResponse(data, status=status, safe=not isinstance(data, list))
+
 from services.supabase_service import SupabaseService
 from services.map_service import MapService
 from services.drug_service import DrugService
@@ -13,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 class DrugSearchView(APIView):
     async def get(self, request):
-        query = request.query_params.get("q", "").strip()
+        params = getattr(request, "query_params", request.GET)
+        query = params.get("q", "").strip()
         if not query:
             return Response([])
 
@@ -26,8 +37,9 @@ class DrugSearchView(APIView):
 
 class UsRoadmapView(APIView):
     async def get(self, request):
-        ingredients = request.query_params.getlist("ingredients")
-        kr_dosage_mg = float(request.query_params.get("kr_dosage_mg", 0.0))
+        params = getattr(request, "query_params", request.GET)
+        ingredients = params.getlist("ingredients")
+        kr_dosage_mg = float(params.get("kr_dosage_mg", 0.0))
 
         if not ingredients:
             return Response({"error": "ingredients are required"}, status=400)

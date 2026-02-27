@@ -1,14 +1,16 @@
 import os
 import logging
-import asyncio
-from asgiref.sync import sync_to_async
+from functools import lru_cache
 from django.shortcuts import render
 from django.http import HttpResponse, JsonResponse
 from graph_agent.builder_v2 import build_graph
-from services.user_service import UserService
-from services.drug_service import DrugService
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_graph():
+    return build_graph()
 
 
 def home(request):
@@ -27,25 +29,11 @@ async def smart_search(request):
 
     logger.info(f"LangGraph User Query: {query}")
 
-    user_profile_data = None
     user_info = request.session.get("supabase_user")
-    
-    if user_info:
-        try:
-            profile = await UserService.get_profile(user_info)
-            if profile:
-                user_profile_data = {
-                    "current_medications": profile.current_medications,
-                    "allergies": profile.allergies,
-                    "chronic_diseases": profile.chronic_diseases,
-                }
-        except Exception as e:
-            logger.error(f"Error fetching user profile from Supabase: {e}")
 
-    inputs = {"query": query, "user_profile": user_profile_data}
+    inputs = {"query": query, "user_info": user_info}
     try:
-        graph = build_graph()
-        result = await graph.ainvoke(inputs)
+        result = await get_graph().ainvoke(inputs)
     except Exception as e:
         logger.error(f"Graph Execution Error: {e}")
         return render(

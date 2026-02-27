@@ -12,6 +12,7 @@ class AgentState(TypedDict):
     dur_data: Optional[List[dict]]
     final_answer: Optional[str]
     user_profile: Optional[dict]
+    user_info: Optional[dict]
     ingredients_data: Optional[List[dict]]  # 성분별 안전·DUR·제품명 정보 (symptom 전용)
 
     # Caching fields
