@@ -351,10 +351,11 @@
         const items = products
           .map((p) => {
             const name = escapeHtml(p.brand_name || "이름 없음");
-            const ingredient = escapeHtml(p.active_ingredient || "");
-            const purpose = escapeHtml(p.purpose || "설명 없음");
-            const ingredientText = ingredient && ingredient !== "Unknown" ? ` (${ingredient})` : "";
-            return `<li><strong>${name}${ingredientText}</strong><br /><span>${purpose}</span></li>`;
+            const manufacturer = escapeHtml(p.manufacturer_name || "Unknown Manufacturer");
+            const summaryKr = escapeHtml(
+              p.summary_kr || "효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요."
+            );
+            return `<li><strong>${name}</strong><br /><span>Manufacturer: ${manufacturer}</span><br /><span>${summaryKr}</span></li>`;
           })
           .join("");
 

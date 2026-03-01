@@ -211,6 +211,7 @@
         border-radius: 10px;
         background: #f8fdfa;
         padding: 0.6rem;
+        position: relative;
       }
 
       .products strong {
@@ -221,6 +222,63 @@
         margin-top: 0.25rem;
         color: #48655e;
         font-size: 0.82rem;
+      }
+
+      .product-meta {
+        margin-top: 0.2rem;
+        color: #55736c;
+        font-size: 0.78rem;
+      }
+
+      .hover-trigger {
+        display: inline-block;
+        margin-top: 0.35rem;
+        font-size: 0.74rem;
+        font-weight: 700;
+        color: #1f5f53;
+        border: 1px dashed #9fd0c2;
+        border-radius: 8px;
+        padding: 0.15rem 0.45rem;
+        background: #ffffff;
+        cursor: default;
+      }
+
+      .hover-box {
+        display: none;
+        position: static;
+        margin-top: 0.35rem;
+        width: 100%;
+        border: 1px solid #c8e5dc;
+        border-radius: 10px;
+        background: #ffffff;
+        box-shadow: 0 4px 12px rgba(7, 33, 29, 0.08);
+        padding: 0.55rem 0.6rem;
+      }
+
+      .products li:hover .hover-box {
+        display: block;
+      }
+
+      .hover-box strong {
+        display: block;
+        font-size: 0.75rem;
+        color: #245149;
+        margin-bottom: 0.3rem;
+      }
+
+      .hover-box ul {
+        list-style: none;
+        display: grid;
+        gap: 0.2rem;
+      }
+
+      .hover-box li {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        padding: 0;
+        font-size: 0.77rem;
+        color: #365850;
       }
 
       .list-toggle {
@@ -419,11 +477,20 @@
                   <ul class="products">
                     {% for prod in ing.products|slice:":5" %}
                     <li>
-                      <strong>{{ prod.brand_name }}</strong>
-                      {% if prod.active_ingredient and prod.active_ingredient != 'Unknown' %}
-                      <span>({{ prod.active_ingredient }})</span>
+                      <strong>{{ prod.brand_name|default:"Unknown Product" }}</strong>
+                      <p class="product-meta">Manufacturer: {{ prod.manufacturer_name|default:"Unknown Manufacturer" }}</p>
+                      <p>{{ prod.summary_kr|default:"효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요." }}</p>
+                      {% if prod.other_active_components %}
+                      <span class="hover-trigger">추가 주성분 보기</span>
+                      <div class="hover-box">
+                        <strong>출력 성분 외 주성분</strong>
+                        <ul>
+                          {% for comp in prod.other_active_components %}
+                          <li>{{ comp.name }} : {{ comp.benefit }}</li>
+                          {% endfor %}
+                        </ul>
+                      </div>
                       {% endif %}
-                      <p>{{ prod.purpose }}</p>
                     </li>
                     {% endfor %}
                   </ul>
@@ -510,10 +577,25 @@
 
         const items = products.slice(0, 5).map((prod) => {
           const brand = escapeHtml(prod.brand_name);
-          const active = escapeHtml(prod.active_ingredient);
-          const purpose = escapeHtml(prod.purpose);
-          const activeHtml = active && active !== "Unknown" ? ` <span>(${active})</span>` : "";
-          return `<li><strong>${brand}</strong>${activeHtml}<p>${purpose}</p></li>`;
+          const manufacturer = escapeHtml(prod.manufacturer_name || "Unknown Manufacturer");
+          const summaryKr = escapeHtml(
+            prod.summary_kr || "효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요."
+          );
+          const components = Array.isArray(prod.other_active_components)
+            ? prod.other_active_components.filter((x) => x && x.name)
+            : [];
+          const extrasHtml = components.length
+            ? `
+              <span class="hover-trigger">추가 주성분 보기</span>
+              <div class="hover-box">
+                <strong>출력 성분 외 주성분</strong>
+                <ul>${components
+                  .map((x) => `<li>${escapeHtml(x.name)} : ${escapeHtml(x.benefit || "증상 완화 보조")}</li>`)
+                  .join("")}</ul>
+              </div>
+            `
+            : "";
+          return `<li><strong>${brand}</strong><p class="product-meta">Manufacturer: ${manufacturer}</p><p>${summaryKr}</p>${extrasHtml}</li>`;
         }).join("");
 
         slot.innerHTML = `<h3 class="section-title">추천 OTC 제품</h3><ul class="products">${items}</ul>`;

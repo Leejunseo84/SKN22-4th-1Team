@@ -27,6 +27,39 @@ class MapService:
         "화상": "burn",
         "곤충교상": "insect bite",
     }
+    _DEFAULT_KR_SUMMARY = (
+        "증상 완화를 위한 일반의약품으로 안내됩니다. "
+        "복용 전 용법·용량과 주의사항을 확인하세요."
+    )
+    _BENEFIT_RULES = [
+        ("진통", "통증 완화"),
+        ("해열", "발열 완화"),
+        ("소염", "염증 완화"),
+        ("기침", "기침 완화"),
+        ("콧물", "콧물 완화"),
+        ("비염", "비염 증상 완화"),
+        ("알레르기", "알레르기 증상 완화"),
+        ("속쓰림", "위산/속쓰림 완화"),
+        ("소화", "소화 불편 완화"),
+        ("복통", "복부 통증 완화"),
+        ("설사", "설사 증상 완화"),
+        ("감기", "감기 증상 완화"),
+        ("수면", "수면 보조"),
+        ("pain", "통증 완화"),
+        ("analgesic", "통증 완화"),
+        ("fever", "발열 완화"),
+        ("antipyretic", "발열 완화"),
+        ("anti-inflammatory", "염증 완화"),
+        ("inflammation", "염증 완화"),
+        ("cough", "기침 완화"),
+        ("allergy", "알레르기 증상 완화"),
+        ("rhinitis", "비염 증상 완화"),
+        ("cold", "감기 증상 완화"),
+        ("indigestion", "소화 불편 완화"),
+        ("heartburn", "위산/속쓰림 완화"),
+        ("diarrhea", "설사 증상 완화"),
+        ("sleep", "수면 보조"),
+    ]
 
     @classmethod
     async def find_nearby_pharmacies(cls, lat: float, lng: float):
@@ -82,16 +115,144 @@ class MapService:
         return "Unknown"
 
     @classmethod
+    def _split_ingredient_tokens_from_text(cls, text: str) -> list:
+        raw = str(text or "").strip()
+        if not raw:
+            return []
+
+        parts = re.split(r"\||/|,|;|\bAND\b|\bWITH\b|\+", raw, flags=re.IGNORECASE)
+        tokens = []
+        seen = set()
+        for part in parts:
+            token = cls._normalize_ingredient(part)
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _split_ingredient_tokens_from_values(cls, values) -> list:
+        tokens = []
+        seen = set()
+        for raw in values or []:
+            parts = re.split(r"\||/|,|;|\bAND\b|\bWITH\b|\+", str(raw), flags=re.IGNORECASE)
+            for part in parts:
+                token = cls._normalize_ingredient(part)
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _extract_product_ingredient_tokens(cls, item: dict) -> list:
+        openfda = item.get("openfda") or {}
+        tokens = cls._split_ingredient_tokens_from_values(openfda.get("substance_name") or [])
+        if not tokens:
+            tokens = cls._split_ingredient_tokens_from_values(openfda.get("generic_name") or [])
+        if tokens:
+            return tokens
+
+        active_values = item.get("active_ingredient") or []
+        if isinstance(active_values, str):
+            active_values = [active_values]
+        return cls._split_ingredient_tokens_from_values(active_values)
+
+    @classmethod
+    def _infer_benefit_brief_kr(cls, text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return "증상 완화 보조"
+        for needle, benefit in cls._BENEFIT_RULES:
+            if needle in raw:
+                return benefit
+        return "증상 완화 보조"
+
+    @classmethod
     def _to_product_payload(cls, item: dict) -> dict:
         openfda = item.get("openfda") or {}
         brand_name = (openfda.get("brand_name") or ["Unknown"])[0]
+        manufacturer_name = (openfda.get("manufacturer_name") or ["Unknown Manufacturer"])[0]
         purpose = (item.get("purpose") or ["No purpose specified."])[0]
 
         return {
             "brand_name": brand_name,
+            "manufacturer_name": manufacturer_name,
             "purpose": purpose,
+            "summary_kr": "",
             "active_ingredient": cls._extract_active_ingredient_text(item),
         }
+
+    @staticmethod
+    def _contains_hangul(text: str) -> bool:
+        return bool(re.search(r"[가-힣]", str(text or "")))
+
+    @classmethod
+    def _fallback_korean_summary(cls, original_text: str = "") -> str:
+        if cls._contains_hangul(original_text):
+            summary = str(original_text).strip()
+        else:
+            summary = cls._DEFAULT_KR_SUMMARY
+        if len(summary) <= 150:
+            return summary
+        return summary[:147].rstrip() + "..."
+
+    @classmethod
+    async def _attach_korean_summaries(cls, products: list) -> list:
+        if not isinstance(products, list) or not products:
+            return products
+
+        purposes = [str((p or {}).get("purpose") or "").strip() for p in products]
+        translated = []
+        try:
+            translated = await AIService.translate_purposes(purposes)
+        except Exception as e:
+            logger.warning(f"Purpose summarization failed: {e}")
+            translated = []
+
+        for i, product in enumerate(products):
+            summary = ""
+            if i < len(translated):
+                summary = str(translated[i] or "").strip()
+            if not summary or not cls._contains_hangul(summary):
+                src = purposes[i] if i < len(purposes) else ""
+                summary = cls._fallback_korean_summary(src)
+            product["summary_kr"] = summary
+        return products
+
+    @classmethod
+    async def ensure_mapping_result_summaries(cls, mapping_result: dict) -> dict:
+        if not isinstance(mapping_result, dict):
+            return mapping_result
+
+        match_type = str(mapping_result.get("match_type") or "").upper()
+        if match_type == "FULL_MATCH":
+            products = mapping_result.get("recommendations")
+            if isinstance(products, list):
+                needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in products)
+                if needs:
+                    await cls._attach_korean_summaries(products)
+            return mapping_result
+
+        if match_type == "COMPONENT_MATCH":
+            rec_groups = mapping_result.get("recommendations")
+            if isinstance(rec_groups, list):
+                for group in rec_groups:
+                    products = (group or {}).get("products")
+                    if not isinstance(products, list):
+                        continue
+                    needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in products)
+                    if needs:
+                        await cls._attach_korean_summaries(products)
+
+            cross = mapping_result.get("cross_ingredient_recommendations")
+            if isinstance(cross, list):
+                needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in cross)
+                if needs:
+                    await cls._attach_korean_summaries(cross)
+
+        return mapping_result
 
     @classmethod
     def _contains_ingredient(cls, text: str, ingredient: str) -> bool:
@@ -185,7 +346,11 @@ class MapService:
                         cls._contains_ingredient(searchable, var) for var in variants
                     ):
                         continue
-                    products_info.append(cls._to_product_payload(item))
+                    payload = cls._to_product_payload(item)
+                    payload["_all_ingredient_tokens"] = cls._extract_product_ingredient_tokens(
+                        item
+                    )
+                    products_info.append(payload)
 
                 unique_products = {
                     (
@@ -198,6 +363,23 @@ class MapService:
                 sorted_products = sorted(
                     list(unique_products), key=lambda x: x.get("brand_name", "")
                 )[: max(limit, 1)]
+                sorted_products = await cls._attach_korean_summaries(sorted_products)
+                for product in sorted_products:
+                    all_tokens = product.get("_all_ingredient_tokens") or []
+                    if not all_tokens:
+                        all_tokens = cls._split_ingredient_tokens_from_text(
+                            product.get("active_ingredient")
+                        )
+
+                    extras = [token for token in all_tokens if token != normalized_ingredient]
+                    benefit = cls._infer_benefit_brief_kr(
+                        product.get("summary_kr") or product.get("purpose")
+                    )
+                    product["other_active_ingredients"] = extras
+                    product["other_active_components"] = [
+                        {"name": token, "benefit": benefit} for token in extras
+                    ]
+                    product.pop("_all_ingredient_tokens", None)
 
                 return {
                     "ingredient": normalized_ingredient,
@@ -249,19 +431,7 @@ class MapService:
                     )[:10]
 
                     if products:
-                        try:
-                            purposes_to_translate = [p["purpose"] for p in products]
-                            translated_purposes = await AIService.translate_purposes(
-                                purposes_to_translate
-                            )
-                            for i, prod in enumerate(products):
-                                if i < len(translated_purposes):
-                                    prod["purpose"] = translated_purposes[i]
-                        except Exception as translate_error:
-                            logger.warning(
-                                "Purpose translation failed, returning English purposes: %s",
-                                translate_error,
-                            )
+                        products = await cls._attach_korean_summaries(products)
 
                     return {
                         "match_type": "FULL_MATCH",
