@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from collections import Counter
 from functools import lru_cache
 
@@ -221,3 +222,52 @@ async def pharmacy_api(request):
     except Exception as e:
         logger.error(f"Error fetching pharmacies: {e}")
         return JsonResponse({"status": "error", "message": str(e)})
+
+
+async def symptom_products_api(request):
+    raw = request.GET.get("ingredients", "").strip()
+    symptom = (request.GET.get("symptom") or "").strip()
+    ingredients = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    if not ingredients:
+        return JsonResponse({"status": "error", "message": "ingredients is required"}, status=400)
+
+    from services.map_service import MapService
+    from services.drug_service import DrugService
+    from services.ai_service_v2 import AIService
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def fetch_one(ingr):
+        async with semaphore:
+            try:
+                products_task = MapService.get_us_otc_products_by_ingredient(ingr, limit=5)
+                warning_task = DrugService.get_fda_warnings_by_ingr(ingr)
+                if symptom:
+                    products_task = MapService.get_us_otc_products_by_ingredient(
+                        ingr, limit=5, symptom=symptom
+                    )
+                products_res, us_warning_raw = await asyncio.gather(products_task, warning_task)
+                return {
+                    "ingredient": ingr,
+                    "products": products_res.get("products", []),
+                    "us_warning_raw": us_warning_raw,
+                }
+            except Exception as e:
+                logger.warning(f"symptom_products_api failed for '{ingr}': {e}")
+                return {"ingredient": ingr, "products": [], "us_warning_raw": None}
+
+    items = await asyncio.gather(*[fetch_one(ingr) for ingr in ingredients])
+
+    raw_warning_map = {
+        item["ingredient"]: item.get("us_warning_raw")
+        for item in items
+        if item.get("ingredient")
+    }
+    summarized_map = await AIService.bulk_summarize_fda_warnings(raw_warning_map)
+
+    for item in items:
+        ingredient = item.get("ingredient")
+        item["us_warning"] = summarized_map.get(ingredient) if ingredient else None
+        item.pop("us_warning_raw", None)
+
+    return JsonResponse({"status": "success", "items": items})

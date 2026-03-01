@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class DrugService:
     FDA_BASE_URL = "https://api.fda.gov/drug/label.json"
     FDA_OTC_FILTER = 'openfda.product_type:"HUMAN OTC DRUG"'
+    FDA_WARNING_CONCURRENCY = 3
 
     # 성분명 매핑 테이블 (FDA generic_name -> KR DUR ingr_eng_name)
     MANUAL_INGR_MAPPING = {
@@ -181,21 +182,27 @@ class DrugService:
         ]
 
     @classmethod
-    async def get_fda_warnings_by_ingr(cls, ingr_name: str):
+    async def get_fda_warnings_by_ingr(cls, ingr_name: str, client: httpx.AsyncClient = None):
         url = (
             f"{cls.FDA_BASE_URL}"
             f'?search=openfda.generic_name:"{ingr_name}"+AND+{cls.FDA_OTC_FILTER}'
             f"&limit=1"
         )
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            try:
-                res = await client.get(url)
-                if res.status_code == 200:
-                    data = res.json().get("results", [])
-                    if data:
-                        return data[0].get("warnings", ["No FDA warning found."])[0]
-            except Exception as e:
-                logger.warning(f"Error fetching FDA warnings for '{ingr_name}': {e}")
+        owns_client = client is None
+        if owns_client:
+            client = httpx.AsyncClient(timeout=5.0)
+
+        try:
+            res = await client.get(url)
+            if res.status_code == 200:
+                data = res.json().get("results", [])
+                if data:
+                    return data[0].get("warnings", ["No FDA warning found."])[0]
+        except Exception as e:
+            logger.warning(f"Error fetching FDA warnings for '{ingr_name}': {e}")
+        finally:
+            if owns_client:
+                await client.aclose()
         return None
 
     @classmethod
@@ -203,20 +210,46 @@ class DrugService:
         """영어 성분명 리스트를 받아 KR DUR 및 FDA Warning 정보를 병합"""
         unique_ingrs = sorted(list(set([i.upper() for i in ingr_list])))
 
-        async def fetch_info(ingr):
-            durs, fda_warn = await asyncio.gather(
-                cls._get_kr_durs_async(ingr),
-                cls.get_fda_warnings_by_ingr(ingr)
-            )
+        async with httpx.AsyncClient(timeout=5.0) as shared_client:
+            warning_semaphore = asyncio.Semaphore(cls.FDA_WARNING_CONCURRENCY)
 
+            async def fetch_warning_with_limit(ingr: str):
+                async with warning_semaphore:
+                    return await cls.get_fda_warnings_by_ingr(
+                        ingr, client=shared_client
+                    )
+
+            async def fetch_info(ingr):
+                durs, fda_warn = await asyncio.gather(
+                    cls._get_kr_durs_async(ingr),
+                    fetch_warning_with_limit(ingr),
+                )
+
+                return {
+                    "ingredient": ingr,
+                    "kr_durs": durs,
+                    "fda_warning": fda_warn,
+                }
+
+            enriched_data = await asyncio.gather(
+                *[fetch_info(ingr) for ingr in unique_ingrs]
+            )
+        return list(enriched_data)
+
+    @classmethod
+    async def get_kr_dur_info(cls, ingr_list: list):
+        """영어 성분명 리스트를 받아 KR DUR만 조회 (초기 응답 가속용)."""
+        unique_ingrs = sorted(list(set([i.upper() for i in ingr_list])))
+
+        async def fetch_kr_only(ingr):
+            durs = await cls._get_kr_durs_async(ingr)
             return {
                 "ingredient": ingr,
                 "kr_durs": durs,
-                "fda_warning": fda_warn,
+                "fda_warning": None,
             }
 
-        enriched_data = await asyncio.gather(*[fetch_info(ingr) for ingr in unique_ingrs])
-        return list(enriched_data)
+        return list(await asyncio.gather(*[fetch_kr_only(ingr) for ingr in unique_ingrs]))
 
     @classmethod
     def compare_dosage_and_warn(

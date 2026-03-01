@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 class MapService:
     _FDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
     _OTC_FILTER = 'openfda.product_type:"HUMAN OTC DRUG"'
+    _SYMPTOM_TO_FDA_TERM = {
+        "두통": "headache",
+        "편두통": "migraine",
+        "소화불량": "indigestion",
+        "기침": "cough",
+        "감기": "cold",
+        "발열": "fever",
+        "통증": "pain",
+        "염좌": "sprain",
+        "찰과상": "wound",
+        "상처": "wound",
+        "화상": "burn",
+        "곤충교상": "insect bite",
+    }
 
     @classmethod
     async def find_nearby_pharmacies(cls, lat: float, lng: float):
@@ -86,34 +100,90 @@ class MapService:
         return ingredient.upper() in text.upper()
 
     @classmethod
-    async def get_us_otc_products_by_ingredient(cls, ingredient: str, limit: int = 5):
+    def _ingredient_search_variants(cls, ingredient: str) -> list:
+        """Build search variants to improve openFDA hit rate (e.g., NAPROXEN SODIUM)."""
+        base = cls._normalize_ingredient(ingredient)
+        if not base:
+            return []
+
+        variants = [base, f"{base} SODIUM", f"{base} POTASSIUM"]
+        seen = set()
+        ordered = []
+        for token in variants:
+            key = token.strip().upper()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
+        return ordered
+
+    @classmethod
+    def _normalize_symptom_for_fda(cls, symptom: str) -> str:
+        token = str(symptom or "").strip().lower()
+        if not token:
+            return ""
+        mapped = cls._SYMPTOM_TO_FDA_TERM.get(token)
+        if mapped:
+            return mapped
+        return token
+
+    @classmethod
+    def _build_otc_search_query(cls, ingredient_variants: list, symptom: str = "") -> str:
+        symptom_term = cls._normalize_symptom_for_fda(symptom)
+
+        ingredient_clauses = []
+        for var in ingredient_variants:
+            ingredient_clauses.append(f'openfda.substance_name:"{var}"')
+            ingredient_clauses.append(f'openfda.generic_name:"{var}"')
+            ingredient_clauses.append(f'active_ingredient:"{var}"')
+
+        ingredient_query = f"({' +OR+ '.join(ingredient_clauses)})"
+        if symptom_term:
+            symptom_query = f'(indications_and_usage:"{symptom_term}")'
+            return f"{symptom_query}+AND+{ingredient_query}+AND+{cls._OTC_FILTER}"
+        return f"{ingredient_query}+AND+{cls._OTC_FILTER}"
+
+    @classmethod
+    async def get_us_otc_products_by_ingredient(
+        cls, ingredient: str, limit: int = 5, symptom: str = ""
+    ):
         """Fetch OTC products containing the given ingredient from openFDA."""
         normalized_ingredient = cls._normalize_ingredient(ingredient)
         if not normalized_ingredient:
             return {"ingredient": ingredient, "products": [], "count": 0}
 
-        url = (
-            f"{cls._FDA_LABEL_URL}"
-            f'?search=(openfda.substance_name:"{normalized_ingredient}"'
-            f'+OR+openfda.generic_name:"{normalized_ingredient}")+AND+{cls._OTC_FILTER}'
-            f"&limit=100"
-        )
+        variants = cls._ingredient_search_variants(normalized_ingredient)
+        primary_query = cls._build_otc_search_query(variants, symptom=symptom)
+        fallback_query = cls._build_otc_search_query([normalized_ingredient], symptom="")
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                response = await client.get(url)
+                primary_url = f"{cls._FDA_LABEL_URL}?search={primary_query}&limit=100"
+                response = await client.get(primary_url)
                 if response.status_code != 200:
-                    return {
-                        "ingredient": normalized_ingredient,
-                        "products": [],
-                        "message": "FDA API에서 제품을 찾지 못했습니다.",
-                    }
+                    data = []
+                else:
+                    data = response.json().get("results", [])
 
-                data = response.json().get("results", [])
+                # Fallback for ingredients whose OTC labels are indexed under active_ingredient text.
+                if not data:
+                    fallback_url = f"{cls._FDA_LABEL_URL}?search={fallback_query}&limit=100"
+                    fallback_res = await client.get(fallback_url)
+                    if fallback_res.status_code == 200:
+                        data = fallback_res.json().get("results", [])
+
                 products_info = []
                 for item in data:
                     openfda = item.get("openfda") or {}
                     if not openfda.get("brand_name"):
+                        continue
+                    ingredient_text = cls._extract_active_ingredient_text(item)
+                    generic_text = " ".join(openfda.get("generic_name") or [])
+                    substance_text = " ".join(openfda.get("substance_name") or [])
+                    searchable = f"{ingredient_text} {generic_text} {substance_text}".upper()
+                    if not any(
+                        cls._contains_ingredient(searchable, var) for var in variants
+                    ):
                         continue
                     products_info.append(cls._to_product_payload(item))
 
