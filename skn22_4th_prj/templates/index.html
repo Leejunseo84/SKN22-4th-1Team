@@ -11,6 +11,10 @@
       href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
 
     <style>
       :root {
@@ -298,6 +302,131 @@
         margin-bottom: 2rem;
       }
 
+      .pharmacy-finder {
+        margin-bottom: 2rem;
+        padding: 1.2rem;
+      }
+
+      .pharmacy-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.7rem;
+        flex-wrap: wrap;
+      }
+
+      .pharmacy-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        flex-wrap: wrap;
+      }
+
+      .pharmacy-head h3 {
+        font-size: 1rem;
+        letter-spacing: -0.01em;
+      }
+
+      .pharmacy-head p {
+        color: var(--ink-700);
+        font-size: 0.86rem;
+      }
+
+      .pharmacy-btn {
+        border: 1px solid #9fd0c2;
+        border-radius: 999px;
+        background: #eaf8f2;
+        color: #12493d;
+        font: inherit;
+        font-size: 0.82rem;
+        font-weight: 700;
+        padding: 0.5rem 0.9rem;
+        cursor: pointer;
+      }
+
+      .pharmacy-btn:disabled {
+        opacity: 0.65;
+        cursor: wait;
+      }
+
+      .pharmacy-btn.secondary {
+        background: #ffffff;
+        color: #1f5e52;
+        border-color: #b8d8cf;
+      }
+
+      .pharmacy-status {
+        margin-top: 0.6rem;
+        color: #34574f;
+        font-size: 0.84rem;
+      }
+
+      .pharmacy-list {
+        margin-top: 0.72rem;
+        list-style: none;
+        display: grid;
+        gap: 0.5rem;
+      }
+
+      .pharmacy-list li {
+        border: 1px solid #dbece6;
+        background: #f8fdfa;
+        border-radius: 10px;
+        padding: 0.6rem 0.7rem;
+      }
+
+      .pharmacy-list strong {
+        font-size: 0.87rem;
+      }
+
+      .pharmacy-list p {
+        margin-top: 0.25rem;
+        color: #48655e;
+        font-size: 0.8rem;
+      }
+
+      .open-flag {
+        display: inline-flex;
+        align-items: center;
+        margin-top: 0.28rem;
+        border-radius: 999px;
+        padding: 0.18rem 0.5rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+      }
+
+      .open-flag.open {
+        background: #e5f9ef;
+        color: #16674f;
+      }
+
+      .open-flag.closed {
+        background: #ffe9e2;
+        color: #8d3920;
+      }
+
+      .pharmacy-map-wrap {
+        margin-top: 0.72rem;
+        border: 1px solid #dbece6;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #f8fdfa;
+      }
+
+      .pharmacy-map {
+        width: 100%;
+        height: 320px;
+      }
+
+      .user-pin-dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        background: #e53935;
+        border: 2px solid #ffffff;
+        box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.3);
+      }
+
       .feature {
         border-radius: 18px;
         padding: 1.15rem;
@@ -510,12 +639,45 @@
           <p>주의문구만 나열하지 않고, 대체 선택지와 확인 포인트를 함께 제공합니다.</p>
         </article>
       </section>
+
+      <section class="panel pharmacy-finder">
+        <div class="pharmacy-head">
+          <div>
+            <h3>현재 위치 기반 근처 약국 찾기</h3>
+            <p>위치 권한 허용 시 가까운 약국 목록을 조회합니다.</p>
+          </div>
+          <div class="pharmacy-actions">
+            <button id="findCurrentLocationBtn" class="pharmacy-btn secondary" type="button">내 위치 찾기</button>
+            <button id="findNearbyPharmacyBtn" class="pharmacy-btn" type="button">근처 약국 찾기</button>
+          </div>
+        </div>
+        <p id="pharmacyStatus" class="pharmacy-status">버튼을 누르면 조회를 시작합니다.</p>
+        <p id="currentLocationText" class="pharmacy-status" hidden></p>
+        <div id="pharmacyMapWrap" class="pharmacy-map-wrap" hidden>
+          <div id="pharmacyMap" class="pharmacy-map" aria-label="근처 약국 지도"></div>
+        </div>
+        <ul id="pharmacyList" class="pharmacy-list" hidden></ul>
+      </section>
     </div>
 
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
       const inputEl = document.getElementById("drugInput");
       const formEl = document.getElementById("searchForm");
       const btnEl = formEl.querySelector(".search-btn");
+      const locateBtnEl = document.getElementById("findCurrentLocationBtn");
+      const pharmacyBtnEl = document.getElementById("findNearbyPharmacyBtn");
+      const pharmacyStatusEl = document.getElementById("pharmacyStatus");
+      const currentLocationTextEl = document.getElementById("currentLocationText");
+      const pharmacyListEl = document.getElementById("pharmacyList");
+      const pharmacyMapWrapEl = document.getElementById("pharmacyMapWrap");
+      let pharmacyMap = null;
+      let userLocationMarker = null;
+      let userLocationIcon = null;
+      let pharmacyMarkers = [];
+      let currentCoords = null;
+      let suppressNextMapMoveFetch = false;
+      let mapMoveRefreshTimer = null;
 
       function setLoadingState(loading) {
         inputEl.disabled = loading;
@@ -552,6 +714,381 @@
           executeSearch();
         });
       });
+
+      function ensurePharmacyMap() {
+        if (!window.L || pharmacyMap) return;
+        pharmacyMap = L.map("pharmacyMap", { zoomControl: true });
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: "&copy; OpenStreetMap contributors",
+        }).addTo(pharmacyMap);
+
+        userLocationIcon = L.divIcon({
+          className: "user-pin",
+          html: '<div class="user-pin-dot" aria-hidden="true"></div>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+        });
+
+        pharmacyMap.on("moveend", () => {
+          if (suppressNextMapMoveFetch) {
+            suppressNextMapMoveFetch = false;
+            return;
+          }
+          if (mapMoveRefreshTimer) {
+            clearTimeout(mapMoveRefreshTimer);
+          }
+          mapMoveRefreshTimer = setTimeout(() => {
+            refreshPharmaciesForCurrentMapView();
+          }, 350);
+        });
+      }
+
+      function clearPharmacyMarkers() {
+        if (!pharmacyMap) return;
+        pharmacyMarkers.forEach((marker) => marker.remove());
+        pharmacyMarkers = [];
+      }
+
+      function upsertUserLocationMarker(lat, lng, options = {}) {
+        ensurePharmacyMap();
+        if (!pharmacyMap) return;
+        const openPopup = Boolean(options.openPopup);
+        const latNum = Number(lat);
+        const lngNum = Number(lng);
+        if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return;
+
+        if (userLocationMarker) {
+          userLocationMarker.setLatLng([latNum, lngNum]);
+        } else {
+          userLocationMarker = L.marker([latNum, lngNum], {
+            title: "현재 위치",
+            icon: userLocationIcon || undefined,
+          })
+            .addTo(pharmacyMap)
+            .bindPopup("현재 위치");
+        }
+
+        if (openPopup) {
+          userLocationMarker.openPopup();
+        }
+      }
+
+      function setCurrentLocationText(lat, lng) {
+        if (!currentLocationTextEl) return;
+        currentLocationTextEl.hidden = false;
+        currentLocationTextEl.textContent = `현재 위치: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      }
+
+      function showCurrentLocationOnMap(lat, lng) {
+        ensurePharmacyMap();
+        if (!pharmacyMap || !pharmacyMapWrapEl) return;
+
+        upsertUserLocationMarker(lat, lng, { openPopup: true });
+        pharmacyMapWrapEl.hidden = false;
+        setTimeout(() => {
+          pharmacyMap.invalidateSize();
+          suppressNextMapMoveFetch = true;
+          pharmacyMap.setView([lat, lng], 15);
+        }, 0);
+      }
+
+      function getPosition() {
+        return new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 12000,
+            maximumAge: 60000,
+          })
+        );
+      }
+
+      async function resolveCurrentLocation(options = {}) {
+        const silent = Boolean(options.silent);
+        if (!window.isSecureContext) {
+          if (!silent) {
+            pharmacyStatusEl.textContent = "위치 조회는 HTTPS 또는 localhost 환경에서만 동작합니다.";
+          }
+          throw new Error("insecure_context");
+        }
+        if (!navigator.geolocation) {
+          if (!silent) {
+            pharmacyStatusEl.textContent = "이 브라우저에서는 위치 조회를 지원하지 않습니다.";
+          }
+          throw new Error("geolocation_not_supported");
+        }
+
+        if (!silent) {
+          pharmacyStatusEl.textContent = "현재 위치를 확인 중입니다...";
+        }
+        const pos = await getPosition();
+        const lat = Number(pos.coords.latitude);
+        const lng = Number(pos.coords.longitude);
+        currentCoords = { lat, lng };
+        setCurrentLocationText(lat, lng);
+        showCurrentLocationOnMap(lat, lng);
+        if (!silent) {
+          pharmacyStatusEl.textContent = "현재 위치를 확인했습니다. 근처 약국 찾기를 눌러 조회하세요.";
+        }
+        return currentCoords;
+      }
+
+      function renderNearbyPharmacies(items, userLat, userLng, options = {}) {
+        pharmacyListEl.innerHTML = "";
+        const list = Array.isArray(items) ? items : [];
+        const fitMap = options.fitMap !== false;
+        const listLimit = Number(options.listLimit || 5);
+        ensurePharmacyMap();
+        clearPharmacyMarkers();
+
+        const userLatNum = Number(userLat);
+        const userLngNum = Number(userLng);
+        if (Number.isFinite(userLatNum) && Number.isFinite(userLngNum)) {
+          upsertUserLocationMarker(userLatNum, userLngNum);
+        }
+
+        if (!list.length) {
+          pharmacyListEl.hidden = true;
+          if (pharmacyMapWrapEl && pharmacyMap) {
+            pharmacyMapWrapEl.hidden = !userLocationMarker;
+            if (userLocationMarker) {
+              setTimeout(() => {
+                pharmacyMap.invalidateSize();
+                pharmacyMap.setView(userLocationMarker.getLatLng(), 15);
+              }, 0);
+            }
+          }
+          return;
+        }
+
+        const top = list.slice(0, Math.max(1, Math.min(listLimit, list.length)));
+        top.forEach((item) => {
+          const li = document.createElement("li");
+          const name = (item && (item.name || item.place_name)) || "약국";
+          const address = (item && (item.address || item.vicinity || item.formatted_address)) || "주소 정보 없음";
+          const phone = (item && (item.phone || item.formatted_phone_number)) || "";
+          const hours = (item && (item.opening_hours_text || item.opening_hours)) || "";
+          const openNow = item && typeof item.open_now === "boolean" ? item.open_now : null;
+          const openFlag = openNow === null
+            ? ""
+            : `<span class="open-flag ${openNow ? "open" : "closed"}">${openNow ? "영업 중" : "영업 종료"}</span>`;
+          li.innerHTML = `<strong>${name}</strong>${openFlag}<p>${address}</p>${phone ? `<p>전화: ${phone}</p>` : ""}<p>운영시간: ${hours || "정보 없음"}</p>`;
+          pharmacyListEl.appendChild(li);
+        });
+
+        if (pharmacyMap && pharmacyMapWrapEl) {
+          const bounds = [];
+          if (userLocationMarker) {
+            bounds.push(userLocationMarker.getLatLng());
+          }
+
+          list.forEach((item) => {
+            const lat = Number(item && item.lat);
+            const lng = Number(item && item.lng);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+            const marker = L.marker([lat, lng], { title: item.name || "약국" }).addTo(pharmacyMap);
+            const popupName = item.name || "약국";
+            const popupAddress = item.address || item.vicinity || item.formatted_address || "";
+            const popupPhone = item.phone || item.formatted_phone_number || "";
+            const popupHours = item.opening_hours_text || item.opening_hours || "";
+            const popupOpen = typeof item.open_now === "boolean"
+              ? `<br/>${item.open_now ? "영업 중" : "영업 종료"}`
+              : "";
+            marker.bindPopup(
+              `<strong>${popupName}</strong>${popupAddress ? `<br/>${popupAddress}` : ""}${popupPhone ? `<br/>전화: ${popupPhone}` : ""}${popupHours ? `<br/>운영시간: ${popupHours}` : ""}${popupOpen}`
+            );
+            marker.bindTooltip(
+              `<strong>${popupName}</strong>${popupAddress ? `<br/>${popupAddress}` : ""}${popupHours ? `<br/>운영시간: ${popupHours}` : ""}`,
+              { direction: "top", sticky: true, opacity: 0.95 }
+            );
+            pharmacyMarkers.push(marker);
+            bounds.push(marker.getLatLng());
+          });
+
+          pharmacyMapWrapEl.hidden = false;
+          if (fitMap) {
+            setTimeout(() => {
+              pharmacyMap.invalidateSize();
+              suppressNextMapMoveFetch = true;
+              if (bounds.length >= 2) {
+                pharmacyMap.fitBounds(bounds, { padding: [28, 28] });
+              } else if (bounds.length === 1) {
+                pharmacyMap.setView(bounds[0], 15);
+              }
+            }, 0);
+          }
+        }
+
+        pharmacyListEl.hidden = false;
+      }
+
+      function getMapQueryFromView() {
+        if (!pharmacyMap) return null;
+        const center = pharmacyMap.getCenter();
+        const bounds = pharmacyMap.getBounds();
+        const northEast = bounds.getNorthEast();
+        const distance = center.distanceTo(northEast);
+        const radius = Math.max(500, Math.min(Math.round(distance), 10000));
+        return {
+          lat: Number(center.lat),
+          lng: Number(center.lng),
+          radius,
+          limit: 20,
+        };
+      }
+
+      async function fetchNearbyPharmaciesByQuery(query, options = {}) {
+        const lat = Number(query && query.lat);
+        const lng = Number(query && query.lng);
+        const radius = Number(query && query.radius);
+        const limit = Number(query && query.limit);
+        const userLat = Number(options.userLat);
+        const userLng = Number(options.userLng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+
+        const url = `/api/pharmacies/?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}&radius=${encodeURIComponent(
+          Number.isFinite(radius) ? radius : 3000
+        )}&limit=${encodeURIComponent(Number.isFinite(limit) ? limit : 10)}`;
+        const res = await fetch(url, {
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== "success") {
+          throw new Error(data.message || "약국 조회 실패");
+        }
+
+        renderNearbyPharmacies(
+          data.results || [],
+          Number.isFinite(userLat) ? userLat : lat,
+          Number.isFinite(userLng) ? userLng : lng,
+          {
+          fitMap: options.fitMap !== false,
+          listLimit: Number(options.listLimit || 5),
+          }
+        );
+        return Array.isArray(data.results) ? data.results : [];
+      }
+
+      async function refreshPharmaciesForCurrentMapView() {
+        if (!pharmacyMap || pharmacyMapWrapEl.hidden) return;
+        const query = getMapQueryFromView();
+        if (!query) return;
+        try {
+          pharmacyStatusEl.textContent = "지도의 현재 영역 기준으로 약국을 다시 조회 중입니다...";
+          const results = await fetchNearbyPharmaciesByQuery(query, {
+            fitMap: false,
+            listLimit: 10,
+            userLat: currentCoords && currentCoords.lat,
+            userLng: currentCoords && currentCoords.lng,
+          });
+          if (results.length) {
+            pharmacyStatusEl.textContent = `현재 지도 영역에서 약국 ${Math.min(results.length, 10)}곳을 표시했습니다.`;
+          } else {
+            pharmacyStatusEl.textContent = "현재 지도 영역에서 약국을 찾지 못했습니다.";
+          }
+        } catch (_) {
+          pharmacyStatusEl.textContent = "지도 이동 후 약국 재조회에 실패했습니다.";
+        }
+      }
+
+      async function requestNearbyPharmacies() {
+        let lat = null;
+        let lng = null;
+        pharmacyBtnEl.disabled = true;
+        if (locateBtnEl) {
+          locateBtnEl.disabled = true;
+        }
+        pharmacyStatusEl.textContent = "현재 위치를 확인 중입니다...";
+
+        try {
+          const coords = currentCoords || (await resolveCurrentLocation({ silent: true }));
+          lat = Number(coords.lat);
+          lng = Number(coords.lng);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            throw new Error("invalid_coordinates");
+          }
+          setCurrentLocationText(lat, lng);
+          pharmacyStatusEl.textContent = "근처 약국 정보를 조회 중입니다...";
+          const dataResults = await fetchNearbyPharmaciesByQuery(
+            {
+              lat,
+              lng,
+              radius: 3000,
+              limit: 15,
+            },
+            {
+              fitMap: true,
+              listLimit: 10,
+              userLat: lat,
+              userLng: lng,
+            }
+          );
+          if (Array.isArray(dataResults) && dataResults.length) {
+            pharmacyStatusEl.textContent = `가까운 약국 ${Math.min(dataResults.length, 10)}곳을 표시했습니다.`;
+          } else {
+            pharmacyStatusEl.textContent = "근처 약국을 찾지 못했습니다. 잠시 후 다시 시도해 주세요.";
+          }
+        } catch (error) {
+          const code = Number(error && error.code);
+          if (code === 1) {
+            pharmacyStatusEl.textContent = "위치 권한이 거부되었습니다. 브라우저에서 위치 권한을 허용해 주세요.";
+          } else if (code === 2) {
+            pharmacyStatusEl.textContent = "현재 위치를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+          } else if (code === 3) {
+            pharmacyStatusEl.textContent = "위치 조회 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.";
+          } else {
+            pharmacyStatusEl.textContent = "위치 권한 또는 네트워크 문제로 약국 조회에 실패했습니다.";
+          }
+          pharmacyListEl.hidden = true;
+          if (pharmacyMapWrapEl) {
+            pharmacyMapWrapEl.hidden = !userLocationMarker;
+          }
+          clearPharmacyMarkers();
+        } finally {
+          pharmacyBtnEl.disabled = false;
+          if (locateBtnEl) {
+            locateBtnEl.disabled = false;
+          }
+        }
+      }
+
+      if (locateBtnEl) {
+        locateBtnEl.addEventListener("click", async () => {
+          locateBtnEl.disabled = true;
+          if (pharmacyBtnEl) {
+            pharmacyBtnEl.disabled = true;
+          }
+          try {
+            await resolveCurrentLocation();
+          } catch (error) {
+            const code = Number(error && error.code);
+            if (code === 1) {
+              pharmacyStatusEl.textContent = "위치 권한이 거부되었습니다. 브라우저에서 위치 권한을 허용해 주세요.";
+            } else if (code === 2) {
+              pharmacyStatusEl.textContent = "현재 위치를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+            } else if (code === 3) {
+              pharmacyStatusEl.textContent = "위치 조회 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.";
+            } else if (String(error && error.message) === "insecure_context") {
+              pharmacyStatusEl.textContent = "위치 조회는 HTTPS 또는 localhost 환경에서만 동작합니다.";
+            } else if (String(error && error.message) === "geolocation_not_supported") {
+              pharmacyStatusEl.textContent = "이 브라우저에서는 위치 조회를 지원하지 않습니다.";
+            } else {
+              pharmacyStatusEl.textContent = "현재 위치 조회에 실패했습니다.";
+            }
+          } finally {
+            locateBtnEl.disabled = false;
+            if (pharmacyBtnEl) {
+              pharmacyBtnEl.disabled = false;
+            }
+          }
+        });
+      }
+
+      if (pharmacyBtnEl) {
+        pharmacyBtnEl.addEventListener("click", requestNearbyPharmacies);
+      }
     </script>
   </body>
 </html>
+

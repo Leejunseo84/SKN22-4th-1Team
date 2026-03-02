@@ -53,6 +53,28 @@
         font-size: 0.9rem;
       }
 
+      .action-row {
+        margin-top: 0.75rem;
+      }
+
+      .primary-link-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        padding: 0.5rem 0.85rem;
+        border-radius: 10px;
+        border: 1px solid #9fd0c2;
+        background: #e8f6f1;
+        color: #11453b;
+        font-weight: 800;
+        font-size: 0.84rem;
+      }
+
+      .primary-link-btn:hover {
+        background: #def1ea;
+      }
+
       .hero,
       .card,
       .notice,
@@ -596,6 +618,56 @@
         line-height: 1.55;
       }
 
+      .consult-panel {
+        margin-top: 1rem;
+        padding: 1rem;
+        border-radius: 16px;
+        border: 1px solid #c9e6dc;
+        background: #f3fcf8;
+      }
+
+      .consult-panel h3 {
+        font-size: 0.95rem;
+        color: #1a5549;
+      }
+
+      .consult-meta {
+        margin-top: 0.55rem;
+        display: grid;
+        gap: 0.22rem;
+      }
+
+      .consult-meta p {
+        margin: 0;
+        color: #3d6159;
+        font-size: 0.83rem;
+      }
+
+      .consult-text {
+        margin-top: 0.65rem;
+        border: 1px solid #d1e9df;
+        background: #ffffff;
+        border-radius: 12px;
+        padding: 0.7rem;
+        white-space: pre-wrap;
+        color: #224740;
+        line-height: 1.55;
+        font-size: 0.86rem;
+      }
+
+      .consult-copy-btn {
+        margin-top: 0.58rem;
+        border: 1px solid #9fd0c2;
+        background: #eaf8f2;
+        color: #12493d;
+        border-radius: 10px;
+        font: inherit;
+        font-size: 0.8rem;
+        font-weight: 700;
+        padding: 0.44rem 0.7rem;
+        cursor: pointer;
+      }
+
       @media (max-width: 980px) {
         .wrap {
           width: min(1160px, calc(100% - 1rem));
@@ -628,9 +700,27 @@
         <div class="answer">{{ answer }}</div>
         {% endif %}
         <p id="asyncDurMergeStatus" style="margin-top:0.6rem;color:#2d5b52;font-size:0.84rem;">
-          한국 DUR 기준 성분 안내를 먼저 표시합니다. 미국 OTC 제품 및 미국 경고 정보는 추가 조회 중입니다.
+          복용 가능 성분을 우선 표시하며, 제품 추천 정보는 이 페이지 로드와 동시에 조회를 시작합니다.
+        </p>
+        <p class="action-row">
+          <a id="productsPageLink" class="primary-link-btn" href="{% url 'chat:symptom_products_page' %}">복용 가능 성분 제품 추천 보기</a>
         </p>
       </section>
+
+      {% if consultation_note %}
+      <section class="consult-panel">
+        <h3>의사/약사 상담용 요약 메모</h3>
+        <div class="consult-meta">
+          <p><strong>증상:</strong> {{ consultation_note.symptom }}</p>
+          <p><strong>복용 중인 약:</strong> {{ consultation_note.meds }}</p>
+          <p><strong>알레르기:</strong> {{ consultation_note.allergies }}</p>
+          <p><strong>기저질환:</strong> {{ consultation_note.diseases }}</p>
+          <p><strong>임신/수유 여부:</strong> {{ consultation_note.pregnancy }}</p>
+        </div>
+        <div id="consultMemoText" class="consult-text">{{ consultation_note.memo_text }}</div>
+        <button id="copyConsultMemoBtn" type="button" class="consult-copy-btn">메모 복사</button>
+      </section>
+      {% endif %}
 
       {% if ingredients_data %}
       <section class="result-layout">
@@ -638,6 +728,7 @@
           <h2 class="panel-title">성분/제품 안내</h2>
           <div class="stack">
             {% for ing in ingredients_data %}
+            {% if ing.can_take %}
             <article class="card {% if ing.kr_durs or ing.fda_warning %}dur-emphasis {% endif %}" data-ingredient="{{ ing.name }}" data-can-take="{% if ing.can_take %}1{% else %}0{% endif %}">
               <header class="card-head">
                 <div class="name">
@@ -659,74 +750,15 @@
 
               <div class="body">
                 <div class="product-slot" data-role="product-slot">
-                  {% if ing.products %}
-                  <h3 class="section-title">추천 OTC 제품</h3>
-                  <ul class="products">
-                    {% for prod in ing.products|slice:":3" %}
-                    <li>
-                      <div class="product-top">
-                        {% if prod.amazon_image_url %}
-                        <img class="product-thumb" src="{{ prod.amazon_image_url }}" alt="{{ prod.brand_name|default:'OTC Product' }} image" loading="lazy" />
-                        {% endif %}
-                        <div class="product-main">
-                          {% if prod.amazon_url %}
-                          <strong><a class="product-title-link" href="{{ prod.amazon_url }}" target="_blank" rel="noopener noreferrer">{{ prod.brand_name|default:"Unknown Product" }}</a></strong>
-                          {% elif prod.dailymed_url %}
-                          <strong><a class="product-title-link" href="{{ prod.dailymed_url }}" target="_blank" rel="noopener noreferrer">{{ prod.brand_name|default:"Unknown Product" }}</a></strong>
-                          {% else %}
-                          <strong>{{ prod.brand_name|default:"Unknown Product" }}</strong>
-                          {% endif %}
-                          <p class="product-meta">제조사: {{ prod.manufacturer_name|default:"Unknown Manufacturer" }}</p>
-                          <p class="product-links">
-                            {% if prod.amazon_url %}
-                            <a href="{{ prod.amazon_url }}" target="_blank" rel="noopener noreferrer">아마존 상세</a>
-                            {% endif %}
-                            {% if prod.dailymed_url %}
-                            <a href="{{ prod.dailymed_url }}" target="_blank" rel="noopener noreferrer">DailyMed 정보</a>
-                            {% endif %}
-                          </p>
-                        </div>
-                      </div>
-                      {% if prod.amazon_rank_label %}
-                      <p class="amazon-rank">Amazon BSR: {{ prod.amazon_rank_label }}</p>
-                      {% endif %}
-                      <p>{{ prod.summary_kr|default:"효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요." }}</p>
-                      {% if prod.other_active_dur_notice %}
-                      <p class="product-dur-note">{{ prod.other_active_dur_notice }}</p>
-                      {% endif %}
-                      {% if prod.other_active_components %}
-                      <span class="hover-trigger">추가 주성분 보기</span>
-                      <div class="hover-box">
-                        <strong>출력 성분 외 주성분</strong>
-                        <ul>
-                          {% for comp in prod.other_active_components %}
-                          <li class="component-item">
-                            <div class="component-main">
-                              <strong class="component-name">{{ comp.name }}</strong>
-                              <span class="component-benefit">{{ comp.benefit }}</span>
-                              {% if comp.has_dur_risk %}
-                              <span class="comp-risk-chip">
-                                DUR 주의{% if comp.dur_risk_types %} - {{ comp.dur_risk_types|join:", " }}{% endif %}
-                              </span>
-                              {% endif %}
-                            </div>
-                            {% if comp.has_dur_risk and comp.dur_risk_summary %}
-                            <p class="component-risk-text">{{ comp.dur_risk_summary }}</p>
-                            {% endif %}
-                          </li>
-                          {% endfor %}
-                        </ul>
-                      </div>
-                      {% endif %}
-                    </li>
-                    {% endfor %}
-                  </ul>
+                  {% if ing.can_take %}
+                  <p>복용 가능 성분입니다. 제품 추천은 상단의 <strong>복용 가능 성분 제품 추천 보기</strong>에서 확인할 수 있습니다.</p>
                   {% else %}
-                  <p>미국 OTC 제품 조회 중...</p>
+                  <p>DUR 기준 복용 제한 성분으로 제품 추천 조회 대상에서 제외됩니다.</p>
                   {% endif %}
                 </div>
               </div>
             </article>
+            {% endif %}
             {% endfor %}
           </div>
 
@@ -734,34 +766,46 @@
 
         <aside class="side-area">
           <section class="side-panel">
-            <h2 class="panel-title">성분별 안내사항</h2>
-
+            <h2 class="panel-title">금기 사항별 안내</h2>
             <div class="caution-list">
-              {% for ing in ingredients_data %}
-              <article class="caution-card" data-ingredient="{{ ing.name }}">
-                <h3>{{ ing.name }}</h3>
-                {% if ing.kr_durs %}
-                <ul>
-                  {% for dur in ing.kr_durs %}
-                  <li><strong>{{ dur.type }}</strong> - {{ dur.warning }}</li>
-                  {% endfor %}
-                </ul>
-                {% else %}
-                <p>한국 DUR 기준 특이사항이 확인되지 않았습니다.</p>
-                {% endif %}
-                <div class="caution-fda" data-role="us-warning">
-                  {% if ing.fda_warning %}
-                  <p><strong>FDA</strong> - {{ ing.fda_warning }}</p>
-                  {% else %}
-                  <p><strong>FDA</strong> - 미국 DUR 정보 조회 중...</p>
-                  {% endif %}
-                </div>
+              <article class="caution-card">
+                <h3>병용금기</h3>
+                <p>현재 복용 중인 약 성분과 병용금기 성분이 일치하면 복용 위험으로 분류합니다.</p>
+                <p>일치 근거가 없으면 제품 제외가 아닌 주의 안내로 처리합니다.</p>
               </article>
-              {% endfor %}
-
-              {% if not dur_details %}
-              <p class="side-empty">확인된 안내사항이 없습니다.</p>
-              {% endif %}
+              <article class="caution-card">
+                <h3>임부금기</h3>
+                <p>임신/수유 상태에서 임부금기 성분이 확인되면 복용 위험으로 분류합니다.</p>
+                <p>해당 상태가 아니면 제품 제외가 아닌 주의 안내로 처리합니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>효능군중복</h3>
+                <p>같은 효능군 성분이 중복되면 부작용 위험이나 과다복용 위험이 커질 수 있다는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>용량주의</h3>
+                <p>권장 용량 범위를 지켜야 하며, 연령/체중/기저질환에 따라 용량 조정이 필요할 수 있다는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>투여기간주의</h3>
+                <p>권장 복용 기간을 초과하면 부작용 위험이 증가할 수 있어 단기 복용 원칙을 지켜야 한다는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>노인주의</h3>
+                <p>고령자에서 이상반응 위험이 커질 수 있어 복용 전 확인이 필요한 항목이라는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>특정연령대금기</h3>
+                <p>소아/청소년 등 특정 연령대에서는 복용이 금지되거나 제한될 수 있다는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>질환주의</h3>
+                <p>간/신장 질환 등 기저질환이 있는 경우 복용 전 전문가 확인이 필요하다는 안내입니다.</p>
+              </article>
+              <article class="caution-card">
+                <h3>일반주의</h3>
+                <p>금기까지는 아니지만 개인 상태에 따라 복용 시 주의가 필요할 수 있다는 안내입니다.</p>
+              </article>
             </div>
           </section>
         </aside>
@@ -1166,9 +1210,201 @@
         }
       }
 
+      function buildProductPrefetchKey(symptom, ingredients) {
+        const normalizedSymptom = String(symptom || "").trim().toUpperCase();
+        const normalizedIngredients = (ingredients || [])
+          .map((x) => String(x || "").trim().toUpperCase())
+          .filter(Boolean)
+          .join(",");
+        return `symptom-products-prefetch::${normalizedSymptom}::${normalizedIngredients}`;
+      }
+
+      const PRODUCTS_PREFETCH_NAV_WAIT_MS = 1800;
+      let productsPagePrefetchPromise = null;
+      let productsPagePrefetchDone = false;
+
+      async function prefetchProductsForProductsPage(options = {}) {
+        const dataNode = document.getElementById("ingredients-data-json");
+        if (!dataNode) return;
+
+        let ingredientsData = [];
+        try {
+          ingredientsData = JSON.parse(dataNode.textContent || "[]");
+        } catch (_) {
+          ingredientsData = [];
+        }
+
+        const toCanTakeFlag = (value) => {
+          if (typeof value === "boolean") return value;
+          const token = String(value || "").trim().toLowerCase();
+          return ["true", "1", "yes", "y", "on"].includes(token);
+        };
+
+        const safeIngredients = ingredientsData
+          .filter((ing) => ing && ing.name && toCanTakeFlag(ing.can_take))
+          .map((ing) => String(ing.name).trim().toUpperCase());
+        if (!safeIngredients.length) return;
+
+        const symptomTerm = "{{ symptom|escapejs }}";
+        const storageKey = buildProductPrefetchKey(symptomTerm, safeIngredients);
+        const now = Date.now();
+        const maxAgeMs = 5 * 60 * 1000;
+
+        try {
+          const cachedRaw = sessionStorage.getItem(storageKey);
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            const cachedAt = Number(cached?.cached_at || 0);
+            if (Array.isArray(cached?.items) && cachedAt > 0 && now - cachedAt <= maxAgeMs) {
+              sessionStorage.setItem("symptom-products-prefetch-latest-key", storageKey);
+              return;
+            }
+          }
+        } catch (_) {
+          // Ignore sessionStorage parse errors and continue prefetch.
+        }
+
+        const firstBatchSize = 2;
+        const nextBatchSize = 3;
+        const batches = [];
+        batches.push(safeIngredients.slice(0, firstBatchSize));
+        for (let i = firstBatchSize; i < safeIngredients.length; i += nextBatchSize) {
+          batches.push(safeIngredients.slice(i, i + nextBatchSize));
+        }
+        const maxBatches = Number.isInteger(options.maxBatches) && options.maxBatches > 0
+          ? Math.min(options.maxBatches, batches.length)
+          : batches.length;
+
+        const byIngredient = new Map();
+        for (let i = 0; i < maxBatches; i += 1) {
+          const batchIngredients = batches[i].filter(Boolean);
+          if (!batchIngredients.length) continue;
+
+          try {
+            const url = `/api/symptom-products/?ingredients=${encodeURIComponent(batchIngredients.join(","))}&symptom=${encodeURIComponent(symptomTerm)}`;
+            const res = await fetch(url, { headers: { "X-Requested-With": "XMLHttpRequest" } });
+            const payload = await res.json();
+            if (!res.ok || payload.status !== "success") {
+              continue;
+            }
+
+            const items = Array.isArray(payload.items) ? payload.items : [];
+            items.forEach((item) => {
+              const ingredient = String(item?.ingredient || "").trim().toUpperCase();
+              if (!ingredient) return;
+              byIngredient.set(ingredient, item);
+            });
+          } catch (_) {
+            // Prefetch errors should not block normal navigation.
+          }
+        }
+
+        if (!byIngredient.size) return;
+
+        const normalizedItems = safeIngredients
+          .filter((ingredient) => byIngredient.has(ingredient))
+          .map((ingredient) => byIngredient.get(ingredient));
+        const fetchedIngredients = Array.from(byIngredient.keys());
+        const prefetchComplete = maxBatches >= batches.length;
+
+        try {
+          sessionStorage.setItem(
+            storageKey,
+            JSON.stringify({
+              schema_version: 2,
+              symptom: symptomTerm,
+              ingredients: safeIngredients,
+              items: normalizedItems,
+              fetched_ingredients: fetchedIngredients,
+              prefetch_complete: prefetchComplete,
+              cached_at: Date.now(),
+            })
+          );
+          sessionStorage.setItem("symptom-products-prefetch-latest-key", storageKey);
+        } catch (_) {
+          // Ignore quota/storage errors.
+        }
+      }
+
+      function startProductsPagePrefetch(options = {}) {
+        if (!productsPagePrefetchPromise) {
+          productsPagePrefetchPromise = prefetchProductsForProductsPage(options)
+            .catch(() => {})
+            .finally(() => {
+              productsPagePrefetchDone = true;
+            });
+        }
+        return productsPagePrefetchPromise;
+      }
+
+      function bindProductsPageLinkNavigation() {
+        const link = document.getElementById("productsPageLink");
+        if (!link || link.dataset.prefetchBound === "1") return;
+        link.dataset.prefetchBound = "1";
+
+        link.addEventListener("click", async (event) => {
+          if (productsPagePrefetchDone) return;
+
+          event.preventDefault();
+          const href = link.getAttribute("href") || "/smart-search-products/";
+          const originalText = link.textContent;
+          link.textContent = "제품 후보 준비 중...";
+          link.setAttribute("aria-busy", "true");
+
+          try {
+            await Promise.race([
+              startProductsPagePrefetch(),
+              new Promise((resolve) => setTimeout(resolve, PRODUCTS_PREFETCH_NAV_WAIT_MS)),
+            ]);
+          } finally {
+            link.textContent = originalText;
+            link.removeAttribute("aria-busy");
+            window.location.href = href;
+          }
+        });
+      }
+
+      function bindConsultMemoCopy() {
+        const copyBtn = document.getElementById("copyConsultMemoBtn");
+        const memoEl = document.getElementById("consultMemoText");
+        if (!copyBtn || !memoEl || copyBtn.dataset.copyBound === "1") return;
+        copyBtn.dataset.copyBound = "1";
+
+        copyBtn.addEventListener("click", async () => {
+          const text = (memoEl.textContent || "").trim();
+          if (!text) return;
+
+          const fallbackCopy = () => {
+            const temp = document.createElement("textarea");
+            temp.value = text;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand("copy");
+            document.body.removeChild(temp);
+          };
+
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(text);
+            } else {
+              fallbackCopy();
+            }
+            const original = copyBtn.textContent;
+            copyBtn.textContent = "복사 완료";
+            setTimeout(() => {
+              copyBtn.textContent = original;
+            }, 1200);
+          } catch (_) {
+            fallbackCopy();
+          }
+        });
+      }
+
       document.addEventListener("DOMContentLoaded", () => {
         initIngredientCardInteractions();
-        initAsyncProductEnrichment();
+        bindProductsPageLinkNavigation();
+        bindConsultMemoCopy();
+        startProductsPagePrefetch();
       });
     </script>
   </body>

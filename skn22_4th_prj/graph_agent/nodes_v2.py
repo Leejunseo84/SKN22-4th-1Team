@@ -697,9 +697,12 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
         else:
             safe_ingredients.append(entry)
 
-    # UX priority: show actionable (can_take=true) ingredients/products first,
-    # then show blocked ingredients as additional safety information.
-    ingredients_data = safe_ingredients + blocked_ingredients
+    # UX priority:
+    # - Keep up to 10 actionable ingredients as product-page candidates.
+    # - The product page displays up to 5 cards and backfills from this candidate pool.
+    # - Keep blocked ingredients for safety explanation.
+    max_safe_candidates = 10
+    ingredients_data = safe_ingredients[:max_safe_candidates] + blocked_ingredients
 
     profile_tail = _build_profile_reflection_tail(state.get("user_profile"), ingredients_data)
     final_answer = summary + profile_tail if profile_tail else summary

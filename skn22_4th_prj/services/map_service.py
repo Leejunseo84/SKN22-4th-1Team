@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import math
+import os
 import re
 from urllib.parse import quote_plus
 
@@ -15,6 +17,9 @@ logger = logging.getLogger(__name__)
 class MapService:
     _FDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
     _FDA_NDC_URL = "https://api.fda.gov/drug/ndc.json"
+    _GOOGLE_PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    _GOOGLE_PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+    _OSM_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
     _OTC_FILTER = 'openfda.product_type:"HUMAN OTC DRUG"'
     _NDC_MARKETING_CACHE = {}
     _NDC_LOOKUP_SEMAPHORE = asyncio.Semaphore(6)
@@ -65,10 +70,284 @@ class MapService:
         ("diarrhea", "설사 증상 완화"),
         ("sleep", "수면 보조"),
     ]
+    _VET_TOKEN_PATTERN = re.compile(
+        r"\b(vet|veterinary|animal|pet|pets)\b",
+        flags=re.IGNORECASE,
+    )
+    _VET_KR_KEYWORDS = ("동물", "반려", "애완", "수의")
 
     @classmethod
-    async def find_nearby_pharmacies(cls, lat: float, lng: float):
-        return []
+    async def find_nearby_pharmacies(
+        cls, lat: float, lng: float, radius_m: int = 3000, limit: int = 10
+    ):
+        try:
+            lat_v = float(lat)
+            lng_v = float(lng)
+        except Exception:
+            return []
+
+        if not (-90 <= lat_v <= 90 and -180 <= lng_v <= 180):
+            return []
+        radius_v = int(max(500, min(int(radius_m or 3000), 10000)))
+        limit_v = int(max(1, min(int(limit or 10), 30)))
+
+        google_key = str(os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+        google_results = []
+        if google_key:
+            try:
+                google_results = await cls._find_nearby_pharmacies_google(
+                    lat=lat_v,
+                    lng=lng_v,
+                    api_key=google_key,
+                    radius_m=radius_v,
+                    limit=limit_v,
+                )
+            except Exception as e:
+                logger.warning(f"Google nearby pharmacy lookup failed: {e}")
+                google_results = []
+        if google_results:
+            return google_results
+
+        try:
+            return await cls._find_nearby_pharmacies_osm(
+                lat=lat_v,
+                lng=lng_v,
+                radius_m=radius_v,
+                limit=limit_v,
+            )
+        except Exception as e:
+            logger.warning(f"OSM nearby pharmacy lookup failed: {e}")
+            return []
+
+    @staticmethod
+    def _distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        r = 6371000.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lng2 - lng1)
+        a = (math.sin(dp / 2) ** 2) + math.cos(p1) * math.cos(p2) * (math.sin(dl / 2) ** 2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return r * c
+
+    @classmethod
+    def _is_veterinary_or_pet_place(
+        cls,
+        name: str = "",
+        address: str = "",
+        extra_tokens=None,
+        extra_text: str = "",
+    ) -> bool:
+        token_values = []
+        for value in extra_tokens or []:
+            text = str(value or "").strip()
+            if text:
+                token_values.append(text)
+
+        merged = " ".join(
+            [str(name or "").strip(), str(address or "").strip(), str(extra_text or "").strip(), " ".join(token_values)]
+        ).strip()
+        if not merged:
+            return False
+
+        lowered = merged.lower()
+        if cls._VET_TOKEN_PATTERN.search(lowered):
+            return True
+        if any(keyword in merged for keyword in cls._VET_KR_KEYWORDS):
+            return True
+
+        token_set = {x.lower() for x in token_values}
+        if {"veterinary", "veterinary_care", "animal_hospital", "pet_store"}.intersection(token_set):
+            return True
+        return False
+
+    @classmethod
+    async def _find_nearby_pharmacies_google(
+        cls, lat: float, lng: float, api_key: str, radius_m: int = 3000, limit: int = 10
+    ) -> list:
+        params = {
+            "location": f"{lat},{lng}",
+            "radius": int(max(radius_m, 500)),
+            "type": "pharmacy",
+            "language": "en",
+            "key": api_key,
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(cls._GOOGLE_PLACES_NEARBY_URL, params=params)
+            if res.status_code != 200:
+                raise RuntimeError(f"google_places_http_{res.status_code}")
+            payload = res.json()
+            status = str(payload.get("status") or "")
+            if status not in {"OK", "ZERO_RESULTS"}:
+                message = str(payload.get("error_message") or status or "unknown_error")
+                raise RuntimeError(message)
+
+            raw = payload.get("results") or []
+            items = []
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                geo = (row.get("geometry") or {}).get("location") or {}
+                item_lat = geo.get("lat")
+                item_lng = geo.get("lng")
+                if item_lat is None or item_lng is None:
+                    continue
+                name = str(row.get("name") or "Pharmacy").strip()
+                address = str(row.get("vicinity") or row.get("formatted_address") or "").strip()
+                types = row.get("types") or []
+                if cls._is_veterinary_or_pet_place(
+                    name=name,
+                    address=address,
+                    extra_tokens=types,
+                ):
+                    continue
+
+                items.append(
+                    {
+                        "name": name or "Pharmacy",
+                        "address": address,
+                        "vicinity": row.get("vicinity") or "",
+                        "formatted_address": row.get("formatted_address") or row.get("vicinity") or "",
+                        "lat": item_lat,
+                        "lng": item_lng,
+                        "place_id": row.get("place_id") or "",
+                        "phone": "",
+                        "open_now": (row.get("opening_hours") or {}).get("open_now"),
+                        "opening_hours_text": "",
+                        "rating": row.get("rating"),
+                        "user_ratings_total": row.get("user_ratings_total"),
+                        "source": "google_places",
+                    }
+                )
+
+            trimmed = items[: max(limit, 1)]
+            semaphore = asyncio.Semaphore(5)
+
+            async def _enrich(item: dict):
+                place_id = str(item.get("place_id") or "").strip()
+                if not place_id:
+                    return
+                async with semaphore:
+                    details = await cls._fetch_google_place_details(client, place_id, api_key)
+                if not isinstance(details, dict):
+                    return
+                if details.get("phone"):
+                    item["phone"] = details.get("phone")
+                if details.get("opening_hours_text"):
+                    item["opening_hours_text"] = details.get("opening_hours_text")
+                if isinstance(details.get("open_now"), bool):
+                    item["open_now"] = details.get("open_now")
+
+            await asyncio.gather(*[_enrich(item) for item in trimmed])
+            return trimmed
+
+    @classmethod
+    async def _fetch_google_place_details(
+        cls, client: httpx.AsyncClient, place_id: str, api_key: str
+    ) -> dict:
+        if not place_id or not api_key:
+            return {}
+        params = {
+            "place_id": place_id,
+            "fields": "opening_hours,formatted_phone_number",
+            "language": "en",
+            "key": api_key,
+        }
+        try:
+            res = await client.get(cls._GOOGLE_PLACE_DETAILS_URL, params=params)
+            if res.status_code != 200:
+                return {}
+            payload = res.json()
+            status = str(payload.get("status") or "")
+            if status not in {"OK", "ZERO_RESULTS"}:
+                return {}
+            result = payload.get("result") or {}
+            opening = result.get("opening_hours") or {}
+            weekday_text = opening.get("weekday_text") or []
+            opening_hours_text = " / ".join(
+                [str(x).strip() for x in weekday_text if str(x).strip()]
+            )
+            open_now = opening.get("open_now")
+            phone = str(result.get("formatted_phone_number") or "").strip()
+            return {
+                "phone": phone,
+                "open_now": bool(open_now) if isinstance(open_now, bool) else None,
+                "opening_hours_text": opening_hours_text,
+            }
+        except Exception as e:
+            logger.debug(f"Google place details lookup failed for {place_id}: {e}")
+            return {}
+
+    @classmethod
+    async def _find_nearby_pharmacies_osm(
+        cls, lat: float, lng: float, radius_m: int = 3000, limit: int = 10
+    ) -> list:
+        radius = int(max(radius_m, 500))
+        query = (
+            "[out:json][timeout:20];"
+            "("
+            f'node["amenity"="pharmacy"](around:{radius},{lat},{lng});'
+            f'way["amenity"="pharmacy"](around:{radius},{lat},{lng});'
+            f'relation["amenity"="pharmacy"](around:{radius},{lat},{lng});'
+            ");"
+            "out center tags;"
+        )
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            res = await client.post(cls._OSM_OVERPASS_URL, data={"data": query})
+            if res.status_code != 200:
+                raise RuntimeError(f"osm_overpass_http_{res.status_code}")
+            payload = res.json()
+
+        elements = payload.get("elements") or []
+        parsed = []
+        for row in elements:
+            if not isinstance(row, dict):
+                continue
+
+            center = row.get("center") or {}
+            item_lat = row.get("lat", center.get("lat"))
+            item_lng = row.get("lon", center.get("lon"))
+            if item_lat is None or item_lng is None:
+                continue
+
+            tags = row.get("tags") or {}
+            name = str(tags.get("name") or tags.get("brand") or "Pharmacy").strip()
+            if not name:
+                name = "Pharmacy"
+
+            house = str(tags.get("addr:housenumber") or "").strip()
+            street = str(tags.get("addr:street") or "").strip()
+            city = str(tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village") or "").strip()
+            postcode = str(tags.get("addr:postcode") or "").strip()
+            address_parts = [x for x in [house, street, city, postcode] if x]
+            address = ", ".join(address_parts)
+            if cls._is_veterinary_or_pet_place(
+                name=name,
+                address=address,
+                extra_tokens=[tags.get("healthcare"), tags.get("amenity"), tags.get("shop")],
+                extra_text=f"{tags.get('operator') or ''} {tags.get('description') or ''}",
+            ):
+                continue
+
+            parsed.append(
+                {
+                    "name": name,
+                    "address": address,
+                    "vicinity": address,
+                    "formatted_address": address,
+                    "lat": item_lat,
+                    "lng": item_lng,
+                    "phone": str(tags.get("phone") or tags.get("contact:phone") or "").strip(),
+                    "opening_hours_text": str(tags.get("opening_hours") or "").strip(),
+                    "distance_m": round(cls._distance_meters(lat, lng, float(item_lat), float(item_lng))),
+                    "source": "osm_overpass",
+                }
+            )
+
+        parsed.sort(key=lambda x: x.get("distance_m", 10**9))
+        return parsed[: max(limit, 1)]
 
     @classmethod
     def _normalize_ingredient(cls, raw_value: str) -> str:
@@ -473,7 +752,7 @@ class MapService:
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                primary_url = f"{cls._FDA_LABEL_URL}?search={primary_query}&limit=100"
+                primary_url = f"{cls._FDA_LABEL_URL}?search={primary_query}&limit=50"
                 response = await client.get(primary_url)
                 if response.status_code != 200:
                     data = []
@@ -484,7 +763,7 @@ class MapService:
                 # Fallback for ingredients whose OTC labels are indexed under active_ingredient text.
                 if not data:
                     diagnostics["fallback_used"] = True
-                    fallback_url = f"{cls._FDA_LABEL_URL}?search={fallback_query}&limit=100"
+                    fallback_url = f"{cls._FDA_LABEL_URL}?search={fallback_query}&limit=50"
                     fallback_res = await client.get(fallback_url)
                     if fallback_res.status_code == 200:
                         data = fallback_res.json().get("results", [])
