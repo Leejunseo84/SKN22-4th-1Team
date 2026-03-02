@@ -515,7 +515,7 @@
                   {% if ing.can_take %}
                   <span class="badge safe">복용 가능</span>
                   {% else %}
-                  <span class="badge warn">주의 필요</span>
+                  <span class="badge warn">복용 위험</span>
                   {% endif %}
                   <span>{{ ing.name }}</span>
                 </div>
@@ -708,6 +708,15 @@
         slot.innerHTML = `<h3 class="section-title">추천 OTC 제품</h3><ul class="products">${items}</ul>`;
       }
 
+      function setRiskOnlyProductNotice(ingredient) {
+        const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        const card = cards.find((el) => (el.dataset.ingredient || "").toUpperCase() === ingredient.toUpperCase());
+        if (!card) return;
+        const slot = card.querySelector('[data-role="product-slot"]');
+        if (!slot) return;
+        slot.innerHTML = "<p>DUR 정보상 복용하면 위험하다고 안내되고 있습니다.</p>";
+      }
+
       function updateUsWarning(ingredient, warningText) {
         const cards = Array.from(document.querySelectorAll(".caution-card[data-ingredient]"));
         const card = cards.find((el) => (el.dataset.ingredient || "").toUpperCase() === ingredient.toUpperCase());
@@ -769,13 +778,43 @@
           ingredientsData = [];
         }
 
+        const toCanTakeFlag = (value) => {
+          if (typeof value === "boolean") return value;
+          const token = String(value || "").trim().toLowerCase();
+          return ["true", "1", "yes", "y"].includes(token);
+        };
+
+        const ingredientMetaMap = new Map();
+        ingredientsData.forEach((ing) => {
+          if (!ing || !ing.name) return;
+          const name = String(ing.name).trim().toUpperCase();
+          if (!name) return;
+          ingredientMetaMap.set(name, {
+            can_take: toCanTakeFlag(ing.can_take),
+          });
+        });
+
         const safeIngredients = ingredientsData
-          .filter((ing) => ing && ing.name)
+          .filter((ing) => ing && ing.name && toCanTakeFlag(ing.can_take))
+          .map((ing) => String(ing.name).trim().toUpperCase());
+
+        const riskIngredients = ingredientsData
+          .filter((ing) => ing && ing.name && !toCanTakeFlag(ing.can_take))
           .map((ing) => String(ing.name).trim().toUpperCase());
 
         if (!safeIngredients.length) {
+          const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+          orderedCards.forEach((card) => {
+            const ingredient = String(card.dataset.ingredient || "").toUpperCase();
+            if (riskIngredients.includes(ingredient)) {
+              showIngredientRows(ingredient);
+              setRiskOnlyProductNotice(ingredient);
+            } else {
+              hideIngredientRows(ingredient);
+            }
+          });
           if (statusEl) {
-            statusEl.textContent = "복용 가능 성분이 없어 제품 조회를 생략했습니다.";
+            statusEl.textContent = "DUR 기준 복용 가능 성분이 없어 제품 조회를 생략했습니다.";
           }
           return;
         }
@@ -801,6 +840,15 @@
           let keptCount = 0;
           orderedCards.forEach((card) => {
             const ingredient = String(card.dataset.ingredient || "").toUpperCase();
+            const meta = ingredientMetaMap.get(ingredient) || { can_take: true };
+
+            if (meta.can_take === false) {
+              showIngredientRows(ingredient);
+              setRiskOnlyProductNotice(ingredient);
+              updateUsWarning(ingredient, "복용 위험 성분으로 미국 OTC 조회 대상에서 제외되었습니다.");
+              return;
+            }
+
             const payloadItem = productMap.get(ingredient) || { products: [], us_warning: "" };
             const products = payloadItem.products || [];
             if (!products.length || keptCount >= 5) {
@@ -816,9 +864,9 @@
 
           if (statusEl) {
             if (keptCount > 0) {
-              statusEl.textContent = `미국 OTC 제품이 확인된 성분 ${keptCount}개를 기준으로 종합 DUR 정보를 업데이트했습니다. OTC 제품이 없는 성분은 결과에서 제외했습니다.`;
+              statusEl.textContent = `복용 가능 성분 중 미국 OTC 제품이 확인된 ${keptCount}개를 기준으로 결과를 업데이트했습니다. DUR 기준 복용 위험 성분은 제품 조회에서 제외했습니다.`;
             } else {
-              statusEl.textContent = "해당 성분들로 미국 OTC 제품이 확인되지 않아 추천 결과에서 제외되었습니다.";
+              statusEl.textContent = "복용 가능 성분에서 미국 OTC 제품이 확인되지 않아 제품 추천 결과에서 제외되었습니다.";
             }
           }
         } catch (error) {

@@ -242,7 +242,7 @@ async def symptom_products_api(request):
     async def fetch_one(ingr):
         async with semaphore:
             try:
-                products_kwargs = {"limit": 5}
+                products_kwargs = {"limit": 3}
                 if symptom:
                     products_kwargs["symptom"] = symptom
                 products_task = MapService.get_us_otc_products_by_ingredient(
@@ -290,7 +290,7 @@ async def symptom_products_api(request):
             empty_products.append(ingredient)
 
     logger.warning(
-        "symptom_products_api summary: symptom='%s' requested=%d with_products=%d without_products=%d max_visible=5",
+        "symptom_products_api summary: symptom='%s' requested=%d with_products=%d without_products=%d max_visible=3",
         symptom,
         len(ingredients),
         len(with_products),
