@@ -30,6 +30,8 @@ SYMPTOM_TO_FDA_TERMS = {
     "곤충교상": ["insect bite"],
 }
 
+_EMPTY_PROFILE_TOKENS = {"none", "없음", "없어요", "n/a", "na", "x"}
+
 
 def _to_fda_symptom_terms(symptom_term: str):
     token = str(symptom_term or "").strip().lower()
@@ -57,16 +59,12 @@ def _has_user_risk_profile(user_profile):
     if not isinstance(user_profile, dict):
         return False
 
+    if _to_bool(user_profile.get("is_pregnant")):
+        return True
+
     for key in ("current_medications", "allergies", "chronic_diseases"):
         value = str(user_profile.get(key) or "").strip().lower()
-        if value and value not in {
-            "none",
-            "\uc5c6\uc74c",
-            "\uc5c6\uc5b4\uc694",
-            "n/a",
-            "na",
-            "x",
-        }:
+        if value and value not in _EMPTY_PROFILE_TOKENS:
             return True
     return False
 
@@ -115,6 +113,174 @@ def _fallback_reason(can_take: bool, warning_types) -> str:
     )
 
 
+def _profile_value(user_profile, key: str) -> str:
+    if not isinstance(user_profile, dict):
+        return ""
+    return str(user_profile.get(key) or "").strip()
+
+
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    token = str(value or "").strip().lower()
+    return token in {"true", "1", "yes", "y", "on"}
+
+
+def _has_profile_value(user_profile, key: str) -> bool:
+    value = _profile_value(user_profile, key).lower()
+    return bool(value and value not in _EMPTY_PROFILE_TOKENS)
+
+
+def _collect_warning_types(dur_item: dict) -> list:
+    if not isinstance(dur_item, dict):
+        return []
+    seen = set()
+    warning_types = []
+    for row in dur_item.get("kr_durs", []) or []:
+        if not isinstance(row, dict):
+            continue
+        dur_type = str(row.get("type") or "").strip()
+        if not dur_type:
+            continue
+        key = dur_type.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        warning_types.append(dur_type)
+    return warning_types
+
+
+def _collect_warning_excerpt(dur_item: dict, max_len: int = 160) -> str:
+    if not isinstance(dur_item, dict):
+        return ""
+    for row in dur_item.get("kr_durs", []) or []:
+        if not isinstance(row, dict):
+            continue
+        warning = str(row.get("warning") or "").strip()
+        if not warning:
+            continue
+        if len(warning) > max_len:
+            return warning[: max_len - 3].rstrip() + "..."
+        return warning
+    return ""
+
+
+def _extract_combined_partner_tokens(warning_text: str) -> list:
+    raw = str(warning_text or "")
+    if not raw:
+        return []
+
+    patterns = [
+        r"병용금기\s*성분\s*:\s*([^\n]+)",
+        r"contraindicated\s*(?:with)?\s*:\s*([^\n]+)",
+    ]
+    captured = ""
+    for pattern in patterns:
+        matched = re.search(pattern, raw, flags=re.IGNORECASE)
+        if matched:
+            captured = str(matched.group(1) or "").strip()
+            break
+    if not captured:
+        return []
+
+    chunks = re.split(r"[,/;|+]", captured)
+    tokens = []
+    seen = set()
+    for chunk in chunks:
+        token = str(chunk or "").strip().lower()
+        token = re.sub(r"\([^)]*\)", "", token).strip()
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def _evaluate_profile_risk_for_ingredient(
+    dur_item: dict,
+    user_profile: dict,
+    has_user_risk: bool,
+):
+    warning_types = _collect_warning_types(dur_item)
+    if not has_user_risk:
+        return True, warning_types, _fallback_reason(True, warning_types)
+
+    meds = _profile_value(user_profile, "current_medications")
+    is_pregnant = _to_bool((user_profile or {}).get("is_pregnant"))
+    has_meds = _has_profile_value(user_profile, "current_medications")
+
+    rows = dur_item.get("kr_durs", []) if isinstance(dur_item, dict) else []
+    block_reasons = []
+    caution_notes = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        type_text = str(row.get("type") or "").strip()
+        warning_text = str(row.get("warning") or "").strip()
+        merged = f"{type_text} {warning_text}".lower()
+
+        is_pregnancy_rule = any(
+            token in merged
+            for token in ("임부", "임신", "수유", "pregnan", "lactat", "breastfeeding")
+        )
+        is_combined_contra = any(
+            token in merged
+            for token in ("병용금기", "combined", "contraindicated combination")
+        )
+
+        if is_pregnancy_rule:
+            if is_pregnant:
+                block_reasons.append("임신/수유 중 사용 금기(임부금기) 항목으로 확인되었습니다.")
+            else:
+                caution_notes.append("임부/수유부 대상 금기 항목이 있어 해당 조건에서는 복용 금지입니다.")
+            continue
+
+        if is_combined_contra:
+            if has_meds:
+                med_text = meds.lower()
+                partner_tokens = _extract_combined_partner_tokens(warning_text)
+                matched_partner = next((p for p in partner_tokens if p and p in med_text), "")
+                if matched_partner:
+                    block_reasons.append(
+                        f"현재 복용 중인 약({meds})과 병용금기 성분({matched_partner})이 일치합니다."
+                    )
+                else:
+                    caution_notes.append(
+                        "병용금기 항목이 있으나 현재 복용약과의 직접 일치 근거가 확인되지 않아 주의 안내로 표시합니다."
+                    )
+            else:
+                caution_notes.append("병용금기 항목이 있으나 현재 복용약 정보가 없어 주의 안내로 표시합니다.")
+            continue
+
+        if type_text:
+            caution_notes.append(f"DUR '{type_text}' 항목으로 복용 시 주의가 필요합니다.")
+
+    warning_excerpt = _collect_warning_excerpt(dur_item)
+    if block_reasons:
+        joined = " ".join(dict.fromkeys(block_reasons))
+        if warning_types:
+            joined += f" (DUR 유형: {', '.join(warning_types[:3])})"
+        if warning_excerpt:
+            joined += f" 근거 문구: {warning_excerpt}"
+        return False, warning_types, joined
+
+    if warning_types:
+        caution_summary = " ".join(dict.fromkeys(caution_notes[:2])) if caution_notes else ""
+        if caution_summary:
+            return (
+                True,
+                warning_types,
+                f"{caution_summary} (DUR 유형: {', '.join(warning_types[:3])})",
+            )
+        return (
+            True,
+            warning_types,
+            f"입력한 건강정보와 직접 충돌 근거는 확인되지 않았지만 DUR 주의 항목({', '.join(warning_types[:3])})이 있어 복용 전 전문가 확인을 권장합니다.",
+        )
+    return True, warning_types, _fallback_reason(True, warning_types)
+
+
 def _build_profile_reflection_tail(user_profile, ingredients_data):
     if not isinstance(user_profile, dict):
         return ""
@@ -122,6 +288,7 @@ def _build_profile_reflection_tail(user_profile, ingredients_data):
     meds = _to_profile_text(user_profile.get("current_medications"))
     allergies = _to_profile_text(user_profile.get("allergies"))
     diseases = _to_profile_text(user_profile.get("chronic_diseases"))
+    pregnancy = "예" if _to_bool(user_profile.get("is_pregnant")) else "아니오"
 
     blocked = []
     caution = []
@@ -162,6 +329,7 @@ def _build_profile_reflection_tail(user_profile, ingredients_data):
         f"- \ubcf5\uc6a9 \uc911\uc778 \uc57d: {meds}\n"
         f"- \uc54c\ub808\ub974\uae30: {allergies}\n"
         f"- \uae30\uc800\uc9c8\ud658: {diseases}\n"
+        f"- 임신/수유 여부: {pregnancy}\n"
         f"- \ubc18\uc601 \uacb0\uacfc: {reflection}"
     )
 
@@ -283,16 +451,18 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
                         "current_medications": profile.current_medications,
                         "allergies": applied_allergies,
                         "chronic_diseases": applied_chronic_diseases,
+                        "is_pregnant": bool(getattr(profile, "is_pregnant", False)),
                     }
             except Exception as e:
                 logger.error(f"Error fetching user profile from Supabase: {e}")
 
     if category == "symptom_recommendation":
-        db_symptom_term = await AIService.canonicalize_symptom_term(
-            query=query,
-            hint_keyword=keyword,
-        )
-        db_symptom_term = (db_symptom_term or keyword or query).strip()
+        # Fast path: avoid extra LLM hop for canonicalization to reduce first-page latency.
+        db_symptom_term = (keyword or query).strip()
+        for known in SYMPTOM_TO_FDA_TERMS.keys():
+            if known and known in str(query):
+                db_symptom_term = known
+                break
 
         ranked_ingredients = await SupabaseService.search_ingredient_scores_by_symptom(
             keyword=db_symptom_term,
@@ -305,16 +475,26 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
             eng_kw = _to_fda_symptom_terms(keyword)
         if not eng_kw:
             eng_kw = ["pain"]
-        synonyms = await AIService.get_symptom_synonyms(keyword or query)
-        search_terms = _merge_unique_terms(eng_kw, synonyms)
-        logger.info(
-            "FDA symptom ingredient terms: %s",
-            ", ".join(search_terms),
-        )
-        fda_candidates = await DrugService.get_ingrs_from_fda_by_symptoms(
-            search_terms
-        )
-        fda_candidates = canonicalize_ingredient_list(fda_candidates)
+        search_terms = list(eng_kw)
+        fda_candidates = []
+        should_query_fda_candidates = not ranked_ingredients or len(ranked_ingredients) < 5
+        if should_query_fda_candidates:
+            logger.info(
+                "FDA symptom ingredient terms: %s",
+                ", ".join(search_terms),
+            )
+            fda_candidates = await DrugService.get_ingrs_from_fda_by_symptoms(
+                search_terms
+            )
+            fda_candidates = canonicalize_ingredient_list(fda_candidates)
+            if not fda_candidates:
+                synonyms = await AIService.get_symptom_synonyms(keyword or query)
+                if synonyms:
+                    search_terms = _merge_unique_terms(eng_kw, synonyms)
+                    fda_candidates = await DrugService.get_ingrs_from_fda_by_symptoms(
+                        search_terms
+                    )
+                    fda_candidates = canonicalize_ingredient_list(fda_candidates)
 
         if ranked_ingredients:
             merged_scores = {}
@@ -332,21 +512,14 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
 
         # Primary source of truth:
         # unified_drug_info.efficacy matches symptom -> extract ingredients from main_ingr_eng.
-        # Then reduce noisy combo ingredients by selecting symptom-direct top ingredients.
+        # Keep top-score ingredients first for low-latency first response.
         selected_ingredients = []
         if scored_candidates:
-            selected_ingredients = await AIService.select_direct_symptom_ingredients(
-                symptom=db_symptom_term or query,
-                candidates=scored_candidates,
-                top_n=10,
-            )
-            selected_ingredients = canonicalize_ingredient_list(selected_ingredients)[:10]
-            if not selected_ingredients:
-                selected_ingredients = [
-                    item["ingredient"]
-                    for item in scored_candidates
-                    if item.get("ingredient")
-                ][:10]
+            selected_ingredients = [
+                item["ingredient"]
+                for item in scored_candidates
+                if item.get("ingredient")
+            ][:10]
             if selected_ingredients and fda_candidates:
                 selected_ingredients = canonicalize_ingredient_list(
                     selected_ingredients
@@ -472,67 +645,31 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
         prefix = "해당 증상에 대한 DB/FDA/DUR 기반 정보를 찾기 어려워 일반 가이드를 제공합니다.\n\n"
         return {"final_answer": prefix + answer, "ingredients_data": []}
 
-    ai_result = await AIService.generate_symptom_answer(
-        symptom, dur_data, state.get("user_profile")
+    summary = (
+        f"입력 증상 '{symptom}'에 대해 한국 DUR 성분 정보를 우선 분석했습니다. "
+        "사용자 건강정보(복용약/알레르기/기저질환)가 있으면 복용 가능/주의 여부를 함께 반영합니다."
     )
-
-    should_retry = not isinstance(ai_result, dict) or ("ingredients" not in ai_result)
-    if should_retry:
-        retry_result = await AIService.generate_symptom_answer(
-            symptom, dur_data, state.get("user_profile")
-        )
-        if isinstance(retry_result, dict):
-            ai_result = retry_result
-
-    if not isinstance(ai_result, dict):
-        return {
-            "final_answer": str(ai_result),
-            "dur_data": dur_data,
-            "ingredients_data": [],
-        }
-
-    summary = ai_result.get("summary", "")
-    if not isinstance(summary, str) or not summary.strip():
-        summary = "요청 증상 관련 성분 안전성과 주의사항을 정리했습니다."
-    ai_ingredients = _normalize_ai_ingredients(ai_result.get("ingredients", []), dur_data)
-
-    # Policy: without user risk profile, do not classify ingredients as "cannot take".
-    # can_take=false is only allowed when there is user-specific risk information to evaluate.
     has_user_risk = _has_user_risk_profile(state.get("user_profile"))
-    if not has_user_risk:
-        for ing in ai_ingredients:
-            ing["can_take"] = True
-            reason = str(ing.get("reason") or "").strip()
-            if not reason:
-                ing["reason"] = (
-                    "\uac1c\uc778 \uac74\uac15\uc815\ubcf4(\ubcf5\uc6a9\uc57d/"
-                    "\uc54c\ub808\ub974\uae30/\uae30\uc800\uc9c8\ud658) \ubbf8\uc785\ub825 \uc0c1\ud0dc\ub85c "
-                    "\uc77c\ubc18 \ubcf5\uc6a9 \uac00\ub2a5 \uae30\uc900\uc73c\ub85c \uc548\ub0b4\ub429\ub2c8\ub2e4."
-                )
-
     dur_map = {item["ingredient"].upper(): item for item in dur_data}
-    ai_map = {}
-    for ing in ai_ingredients:
-        name = str(ing.get("name") or "").strip().upper()
-        if not name:
-            continue
-        ai_map[name] = ing
 
     # Keep rendering order aligned with DB-ranked ingredients (1~10).
-    # This guarantees initial UI shows rank 1~5 first, then 6~10 as replacement pool.
+    # Show all analyzed ingredients so blocked ingredients and reasons are visible.
     ranked_ingredients = state.get("ingredient_candidates") or []
     ordered_names = [str(x).strip().upper() for x in ranked_ingredients if str(x).strip()]
     if not ordered_names:
         ordered_names = [str(item.get("ingredient") or "").strip().upper() for item in dur_data]
         ordered_names = [x for x in ordered_names if x]
 
-    ingredients_data = []
+    safe_ingredients = []
+    blocked_ingredients = []
     for name in ordered_names:
         dur_item = dur_map.get(name, {})
-        ai_item = ai_map.get(name, {})
-        can_take = ai_item.get("can_take", True)
-        warning_types = ai_item.get("dur_warning_types", [])
-        reason = str(ai_item.get("reason") or "").strip()
+        can_take, warning_types, reason = _evaluate_profile_risk_for_ingredient(
+            dur_item=dur_item,
+            user_profile=state.get("user_profile") or {},
+            has_user_risk=has_user_risk,
+        )
+        reason = str(reason or "").strip()
         if _looks_mojibake(reason):
             reason = _fallback_reason(can_take, warning_types)
         if can_take is False:
@@ -555,7 +692,14 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             "fda_warning": dur_item.get("fda_warning", None),
             "products": products_map.get(name, []),
         }
-        ingredients_data.append(entry)
+        if can_take is False:
+            blocked_ingredients.append(entry)
+        else:
+            safe_ingredients.append(entry)
+
+    # UX priority: show actionable (can_take=true) ingredients/products first,
+    # then show blocked ingredients as additional safety information.
+    ingredients_data = safe_ingredients + blocked_ingredients
 
     profile_tail = _build_profile_reflection_tail(state.get("user_profile"), ingredients_data)
     final_answer = summary + profile_tail if profile_tail else summary
@@ -594,4 +738,5 @@ async def generate_general_answer_node(state: AgentState) -> AgentState:
 async def generate_error_node(state: AgentState) -> AgentState:
     return {
         "final_answer": "질문을 이해하지 못했거나 의약품과 관련 없는 요청입니다."
+
     }

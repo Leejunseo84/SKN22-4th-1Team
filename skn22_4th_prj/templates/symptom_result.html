@@ -638,7 +638,7 @@
           <h2 class="panel-title">성분/제품 안내</h2>
           <div class="stack">
             {% for ing in ingredients_data %}
-            <article class="card {% if ing.kr_durs or ing.fda_warning %}dur-emphasis {% endif %}{% if forloop.counter > 5 %}hidden-card extra-ingredient{% endif %}" data-ingredient="{{ ing.name }}" data-can-take="{% if ing.can_take %}1{% else %}0{% endif %}">
+            <article class="card {% if ing.kr_durs or ing.fda_warning %}dur-emphasis {% endif %}" data-ingredient="{{ ing.name }}" data-can-take="{% if ing.can_take %}1{% else %}0{% endif %}">
               <header class="card-head">
                 <div class="name">
                   {% if ing.can_take %}
@@ -738,7 +738,7 @@
 
             <div class="caution-list">
               {% for ing in ingredients_data %}
-              <article class="caution-card {% if forloop.counter > 5 %}hidden-side extra-ingredient{% endif %}" data-ingredient="{{ ing.name }}">
+              <article class="caution-card" data-ingredient="{{ ing.name }}">
                 <h3>{{ ing.name }}</h3>
                 {% if ing.kr_durs %}
                 <ul>
@@ -798,6 +798,7 @@
         if (!slot) return;
 
         const products = Array.isArray(payloadItem?.products) ? payloadItem.products : [];
+        card.setAttribute("data-has-products", products.length ? "1" : "0");
         const excludedProducts = Array.isArray(payloadItem?.excluded_products_due_to_other_component_dur)
           ? payloadItem.excluded_products_due_to_other_component_dur
           : [];
@@ -914,6 +915,7 @@
         if (!card) return;
         const slot = card.querySelector('[data-role="product-slot"]');
         if (!slot) return;
+        card.setAttribute("data-has-products", "0");
         slot.innerHTML = "<p>DUR 정보상 복용하면 위험하다고 안내되고 있습니다.</p>";
       }
 
@@ -944,10 +946,17 @@
         const visibleCards = cards.filter((card) => !card.classList.contains("hidden-card"));
         if (!visibleCards.length) return;
 
+        const withProducts = visibleCards.find((card) => card.getAttribute("data-has-products") === "1");
         const activeVisible = visibleCards.find((card) => card.classList.contains("is-active"));
-        if (activeVisible) return;
+        if (activeVisible) {
+          if (activeVisible.getAttribute("data-has-products") === "1" || !withProducts) {
+            return;
+          }
+          setActiveIngredientCard(withProducts);
+          return;
+        }
 
-        setActiveIngredientCard(visibleCards[0]);
+        setActiveIngredientCard(withProducts || visibleCards[0]);
       }
 
       function initIngredientCardInteractions() {
@@ -1034,16 +1043,6 @@
           return ["true", "1", "yes", "y"].includes(token);
         };
 
-        const ingredientMetaMap = new Map();
-        ingredientsData.forEach((ing) => {
-          if (!ing || !ing.name) return;
-          const name = String(ing.name).trim().toUpperCase();
-          if (!name) return;
-          ingredientMetaMap.set(name, {
-            can_take: toCanTakeFlag(ing.can_take),
-          });
-        });
-
         const safeIngredients = ingredientsData
           .filter((ing) => ing && ing.name && toCanTakeFlag(ing.can_take))
           .map((ing) => String(ing.name).trim().toUpperCase());
@@ -1052,100 +1051,117 @@
           .filter((ing) => ing && ing.name && !toCanTakeFlag(ing.can_take))
           .map((ing) => String(ing.name).trim().toUpperCase());
 
+        const riskSet = new Set(riskIngredients);
+        const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        orderedCards.forEach((card) => {
+          const ingredient = String(card.dataset.ingredient || "").toUpperCase();
+          if (riskSet.has(ingredient)) {
+            showIngredientRows(ingredient);
+            setRiskOnlyProductNotice(ingredient);
+            updateUsWarning(ingredient, "복용 위험 성분으로 미국 OTC 조회 대상에서 제외되었습니다.");
+            return;
+          }
+          showIngredientRows(ingredient);
+        });
+        ensureActiveIngredientCard();
+
         if (!safeIngredients.length) {
-          const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
-          orderedCards.forEach((card) => {
-            const ingredient = String(card.dataset.ingredient || "").toUpperCase();
-            if (riskIngredients.includes(ingredient)) {
-              showIngredientRows(ingredient);
-              setRiskOnlyProductNotice(ingredient);
-            } else {
-              hideIngredientRows(ingredient);
-            }
-          });
-          ensureActiveIngredientCard();
           if (statusEl) {
             statusEl.textContent = "DUR 기준 복용 가능 성분이 없어 제품 조회를 생략했습니다.";
           }
           return;
         }
 
-        try {
-          const symptomTerm = "{{ symptom|escapejs }}";
-          const url = `/api/symptom-products/?ingredients=${encodeURIComponent(safeIngredients.join(","))}&symptom=${encodeURIComponent(symptomTerm)}`;
-          const res = await fetch(url, { headers: { "X-Requested-With": "XMLHttpRequest" } });
-          const payload = await res.json();
-          if (!res.ok || payload.status !== "success") {
-            throw new Error(payload.message || "Failed to load products");
+        const firstBatchSize = 1;
+        const nextBatchSize = 2;
+        const batches = [];
+        batches.push(safeIngredients.slice(0, firstBatchSize));
+        for (let i = firstBatchSize; i < safeIngredients.length; i += nextBatchSize) {
+          batches.push(safeIngredients.slice(i, i + nextBatchSize));
+        }
+
+        let keptCount = 0;
+        let filteredByOtherComponentCount = 0;
+        let batchErrorCount = 0;
+
+        const applyItemResult = (ingredient, payloadItem) => {
+          const products = Array.isArray(payloadItem?.products) ? payloadItem.products : [];
+          const excludedDueToOther = Array.isArray(payloadItem?.excluded_products_due_to_other_component_dur)
+            ? payloadItem.excluded_products_due_to_other_component_dur
+            : [];
+          const hasExcludedOnly = !products.length && excludedDueToOther.length > 0;
+          filteredByOtherComponentCount += Number(payloadItem?.other_component_dur_filtered_count || 0);
+
+          if (products.length) {
+            keptCount += 1;
+          }
+          showIngredientRows(ingredient);
+          updateProductCard(ingredient, payloadItem);
+          updateUsWarning(ingredient, payloadItem?.us_warning || "");
+        };
+
+        const symptomTerm = "{{ symptom|escapejs }}";
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+          const batchIngredients = batches[batchIndex].filter(Boolean);
+          if (!batchIngredients.length) continue;
+
+          if (statusEl) {
+            statusEl.textContent = `미국 OTC/FDA 정보를 ${batchIndex + 1}/${batches.length} 단계로 조회 중입니다.`;
           }
 
-          const items = Array.isArray(payload.items) ? payload.items : [];
-          const productMap = new Map();
-          items.forEach((item) => {
-            const ingredient = String(item.ingredient || "").toUpperCase();
-            productMap.set(ingredient, {
-              products: Array.isArray(item.products) ? item.products : [],
-              us_warning: item.us_warning || "",
-              other_component_dur_notice: item.other_component_dur_notice || "",
-              excluded_products_due_to_other_component_dur: Array.isArray(item.excluded_products_due_to_other_component_dur)
-                ? item.excluded_products_due_to_other_component_dur
-                : [],
-              other_component_dur_filtered_count: Number(item.other_component_dur_filtered_count || 0),
+          try {
+            const url = `/api/symptom-products/?ingredients=${encodeURIComponent(batchIngredients.join(","))}&symptom=${encodeURIComponent(symptomTerm)}`;
+            const res = await fetch(url, { headers: { "X-Requested-With": "XMLHttpRequest" } });
+            const payload = await res.json();
+            if (!res.ok || payload.status !== "success") {
+              throw new Error(payload.message || "Failed to load products");
+            }
+
+            const items = Array.isArray(payload.items) ? payload.items : [];
+            const byIngredient = new Map();
+            items.forEach((item) => {
+              const ingredient = String(item?.ingredient || "").toUpperCase();
+              if (!ingredient) return;
+              byIngredient.set(ingredient, {
+                products: Array.isArray(item.products) ? item.products : [],
+                us_warning: item.us_warning || "",
+                other_component_dur_notice: item.other_component_dur_notice || "",
+                excluded_products_due_to_other_component_dur: Array.isArray(item.excluded_products_due_to_other_component_dur)
+                  ? item.excluded_products_due_to_other_component_dur
+                  : [],
+                other_component_dur_filtered_count: Number(item.other_component_dur_filtered_count || 0),
+              });
             });
-          });
 
-          const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
-          let keptCount = 0;
-          let filteredByOtherComponentCount = 0;
-          orderedCards.forEach((card) => {
-            const ingredient = String(card.dataset.ingredient || "").toUpperCase();
-            const meta = ingredientMetaMap.get(ingredient) || { can_take: true };
-
-            if (meta.can_take === false) {
-              showIngredientRows(ingredient);
-              setRiskOnlyProductNotice(ingredient);
-              updateUsWarning(ingredient, "복용 위험 성분으로 미국 OTC 조회 대상에서 제외되었습니다.");
-              return;
-            }
-
-            const payloadItem = productMap.get(ingredient) || {
-              products: [],
-              us_warning: "",
-              other_component_dur_notice: "",
-              excluded_products_due_to_other_component_dur: [],
-              other_component_dur_filtered_count: 0,
-            };
-            const products = payloadItem.products || [];
-            const excludedDueToOther = payloadItem.excluded_products_due_to_other_component_dur || [];
-            const hasExcludedOnly = !products.length && excludedDueToOther.length > 0;
-            filteredByOtherComponentCount += Number(payloadItem.other_component_dur_filtered_count || 0);
-
-            if ((!products.length && !hasExcludedOnly) || (keptCount >= 3 && !hasExcludedOnly)) {
-              hideIngredientRows(ingredient);
-              return;
-            }
-
-            if (products.length) {
-              keptCount += 1;
-            }
-            showIngredientRows(ingredient);
-            updateProductCard(ingredient, payloadItem);
-            updateUsWarning(ingredient, payloadItem.us_warning || "");
-          });
-          ensureActiveIngredientCard();
-
-          if (statusEl) {
-            if (keptCount > 0) {
-              statusEl.textContent = `복용 가능 성분 중 미국 OTC 제품이 확인된 ${keptCount}개를 기준으로 결과를 업데이트했습니다. DUR 기준 복용 위험 성분은 제품 조회에서 제외했습니다.${filteredByOtherComponentCount > 0 ? ` 추가 주성분 DUR 위험으로 ${filteredByOtherComponentCount}개 제품을 제외했습니다.` : ""}`;
-            } else {
-              statusEl.textContent = filteredByOtherComponentCount > 0
-                ? `복용 가능 성분의 후보 제품이 추가 주성분 DUR 위험으로 제외되었습니다. (제외 ${filteredByOtherComponentCount}개)`
-                : "복용 가능 성분에서 미국 OTC 제품이 확인되지 않아 제품 추천 결과에서 제외되었습니다.";
-            }
+            batchIngredients.forEach((ingredient) => {
+              const payloadItem = byIngredient.get(ingredient) || {
+                products: [],
+                us_warning: "",
+                other_component_dur_notice: "",
+                excluded_products_due_to_other_component_dur: [],
+                other_component_dur_filtered_count: 0,
+              };
+              applyItemResult(ingredient, payloadItem);
+            });
+            ensureActiveIngredientCard();
+          } catch (_) {
+            batchErrorCount += 1;
+            batchIngredients.forEach((ingredient) => {
+              updateUsWarning(ingredient, "미국 DUR 정보 조회가 지연되고 있습니다.");
+            });
           }
-        } catch (error) {
-          if (statusEl) {
-            statusEl.textContent = "미국 OTC/미국 DUR 정보 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.";
+        }
+
+        if (statusEl) {
+          if (keptCount > 0) {
+            const errorMsg = batchErrorCount > 0 ? ` ${batchErrorCount}개 단계에서 조회 지연이 있어 부분 결과로 표시했습니다.` : "";
+            statusEl.textContent = `복용 가능 성분 ${safeIngredients.length}개에 대해 미국 OTC/FDA 정보를 업데이트했습니다. 제품이 확인된 성분은 ${keptCount}개입니다. DUR 기준 복용 위험 성분은 제품 조회에서 제외하고 사유를 표시합니다.${filteredByOtherComponentCount > 0 ? ` 추가 주성분 DUR 위험으로 ${filteredByOtherComponentCount}개 제품을 제외했습니다.` : ""}${errorMsg}`;
+          } else if (batchErrorCount > 0) {
+            statusEl.textContent = "미국 OTC/미국 DUR 정보 조회가 지연되어 일부 결과만 표시했습니다. 잠시 후 다시 시도해 주세요.";
+          } else {
+            statusEl.textContent = filteredByOtherComponentCount > 0
+              ? `복용 가능 성분의 후보 제품이 추가 주성분 DUR 위험으로 제외되었습니다. (제외 ${filteredByOtherComponentCount}개)`
+              : "복용 가능 성분에서 미국 OTC 제품이 확인되지 않아 제품 추천 결과에서 제외되었습니다.";
           }
         }
       }
